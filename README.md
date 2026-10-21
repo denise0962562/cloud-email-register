@@ -1,0 +1,169 @@
+# iCloud HME — 多账号聚合管理平台
+
+基于 iCloud Hide My Email 协议，批量创建 `@icloud.com` 隐私邮箱的商用聚合平台。
+
+- 👥 **多账号管理** — 同时管理多组 iCloud 账号，每个独立存储、独立会话
+- 🔗 **账号-别名映射** — 自动提取真实 Apple ID，每个隐私邮箱标注归属账号
+- ⏱ **定时调度** — 整点自动触发，多账号轮询创建，触达上限自动切下一个
+- 🌐 **Web UI** — 暖色面板，仪表盘 + 账号列表 + 别名管理 + 跨账号批量创建
+
+## 前提条件
+
+- **iCloud+ 订阅**（Hide My Email 需要 iCloud+）
+- Python 3.10+
+- Windows / macOS / Linux
+
+## 快速开始
+
+```bash
+# 1. 安装依赖
+pip install -r requirements.txt
+
+# 2. 启动 Web UI
+python web_ui.py
+
+# 3. 打开 http://127.0.0.1:5050
+#    点击左下角「导入 Cookie」添加第一个账号
+#    支持粘贴 Cookie Editor 的 Header String 或 JSON
+```
+
+## 使用方式
+
+### Web UI（推荐）
+
+```bash
+python web_ui.py                    # 启动 Web 界面
+python web_ui.py --port 8080        # 指定端口
+python web_ui.py --scheduler        # 启动时自动开启调度器
+```
+
+界面功能：
+
+| 模块 | 功能 |
+|------|------|
+| **账号管理** | 添加/切换/删除账号，每个账号独立 Cookie + 会话 |
+| **仪表盘** | 账号总数、总别名数、今日创建数，每账号一张状态卡片 |
+| **别名列表** | 实时拉取所有别名，标注所属账号 + 真实邮箱 |
+| **批量创建** | 勾选目标账号 → 输入数量 → 跨账号轮询创建 |
+| **调度器** | 一键启停，每整点遍历所有活跃账号创建到上限 |
+
+### 命令行调度器
+
+```bash
+# 多账号定时调度（需要先通过 Web UI 添加账号）
+python scheduler.py
+
+# 指定账号间间隔
+python scheduler.py --interval 5
+
+# 后台守护进程
+python scheduler.py -d
+```
+
+### CLI 手动操作
+
+```bash
+# 列出所有别名
+python icloud_hme.py list --cookies cookies.json
+
+# 创建别名
+python icloud_hme.py create -n 5 --cookies cookies.json
+
+# 删除别名
+python icloud_hme.py delete --email xxx@icloud.com --cookies cookies.json
+```
+
+## Cookie 获取
+
+| 方式 | 说明 |
+|------|------|
+| Web UI 导入 | 点击左下角按钮，粘贴 Cookie Editor 的 Header String |
+| Chrome 自动提取 | Windows 下 `python icloud_hme.py export-cookies` |
+| 命令行 `--cookies` | 指定 JSON 文件路径 |
+
+支持两种输入格式：
+- **Header String**：`name1=value1; name2=value2; ...`
+- **JSON**：`{"name1":"value1", "name2":"value2"}`
+
+导入后自动持久化到 `accounts.json`，重启无需重新粘贴。
+
+## 一键创建与收件链接
+
+使用 `./start.sh` 启动后，打开 `http://127.0.0.1:5050`：
+
+1. 在「批量创建」中选择账号和数量（每账号 1–20 个）。
+2. 点击「一键创建并配置收件」。后台自动创建 iCloud 隐藏地址、独立域名收件箱和仅匹配该别名的转发规则，并读回校验规则与收件凭据。
+3. 结果文本框直接显示每行 `邮箱----收件链接`。可「复制本批文本」或「导出本批 TXT」。TXT 为 UTF-8 纯文本，每行一条，无标题、无 JSON 引号。
+
+```text
+别名1@icloud.com----https://webmail.fastaiapi.cloud/m/mbx_123456789.该邮箱的随机令牌
+别名2@icloud.com----https://webmail.fastaiapi.cloud/m/mbx_987654321.另一个邮箱的随机令牌
+```
+
+当前复用账号已有的 `api.fastaiapi.cloud` 收件服务，收件域为 `fastaiapi.cloud`。`cloud_inbox/` 提供部署到 `webmail.fastaiapi.cloud/m/*` 的专属收件页：直接显示原 iCloud 别名、邮件列表及提取的验证码，每 10 秒自动刷新。每个别名分配独立域名收件箱和独立随机链接；公开页面不显示转发地址，不携带上游 JWT，也不能切换到其他邮箱。
+
+本机 `gpt-auto-register` 的「iCloud 隐藏邮箱（中转）」已支持上述原始短链接：直接导入这里导出的 TXT 即可，程序自动读取链接下的 `/api/messages`，无需修改导出文本。同一链接可以在浏览器打开查看邮件。接收端会核对返回邮箱与导入地址一致，并按邮件 ID、时间过滤重复邮件和旧验证码。
+
+开始前会检查 iCloud 会话和规则权限，并确认隐藏地址转发到本账号的 iCloud 邮箱。如果尚未设置且只有一个可用的 iCloud 邮箱，会自动将其设为默认转发目标（影响此账号隐藏地址的默认转发，不修改主邮箱的全局转发）。全新账号需先开通 iCloud 主邮箱；第一个隐藏地址保留后，再设置并读回确认默认转发目标，以兼容 Apple 的首次初始化要求。随后只添加 `发送至指定别名 → 转发至该别名独立域名邮箱` 的规则，不覆盖冲突规则。
+
+部分失败会保留已创建的别名、域名收件箱和执行进度，停止本账号本轮继续创建，避免留下大量未配置邮箱。在「邮箱列表」点击「补全未完成配置」即可重试，复用原别名与收件箱。若请求超时，先读回规则再决定是否补建，避免重复规则。刷新浏览器后会继续查看同一后台任务；服务重启后任务查看状态失效，但仍可从已保存记录恢复和导出。
+
+「邮箱列表」支持按账号筛选后复制或导出全部已配置记录。未完成配置的条目不混入最终文本。「收件已配置」表示已验证转发规则存在且收件凭据有效，不表示每个新地址都已实际收到测试邮件；Apple 提示规则生效可能需几分钟。遇到 Cookie 过期、服务验证要求或创建频率上限时会显示错误并停止，不绕过限制。
+
+接口：
+
+- `POST /api/create-jobs`：`{"account_ids":["账号ID"],"count_per_account":2,"label":"可选标签"}`，返回 `job_id`。补全已有记录可加 `"mode":"repair"`。
+- `GET /api/create-jobs/{job_id}`：查询进度、每项结果及 `lines` / `output`，查询不会重复执行创建。
+- `GET /api/create-jobs/{job_id}/export`：导出本批已配置成功的记录。
+- `GET /api/inbox-links/export?account_id=账号ID`：按账号导出；省略参数导出全部已配置记录。
+
+Cloudflare 页面只保存独立域名收件箱的读取凭据，不接收 Apple 登录 Cookie。`results/cloud_inbox_config.json` 保存本机注册链接所需的管理令牌，需完成首次 Cloudflare 部署后配置。首次部署使用 `cloud_inbox/wrangler.jsonc`，新 Worker 仅接管 `/m/*` 路由，保留已有临时邮箱站点；`schema.sql` 仅新增 `hme_public_inboxes` 表。
+
+映射与恢复进度保存在被 Git 忽略的 `results/inbox_links.json`，默认仅当前用户可读写。导出内容含收件凭据，持链接者可以访问对应的独立收件箱。服务应保持仅本机访问。Web 界面、AccountManager 和调度器走完整流程；`icloud_hme.py create` 为底层仅创建别名的 CLI。
+
+## 自动注册页面
+
+打开 `http://127.0.0.1:5050/auto`，或点击管理面板的「自动注册」。该页面创建的是 iCloud 隐藏邮箱，并自动配置转发和专属收件链接。
+
+账号 Cookie 分别存放在 `results/account_sessions/<账号ID>.json`（目录权限 700、文件权限 600），`accounts.json` 仅保存账号元数据；旧版内嵌 Cookie 会自动迁移。每个客户端有独立的 Cookie 副本和 HTTP 会话，Apple 成功响应中的 Cookie 更新只保存回所属账号，已替换会话不会被旧客户端覆盖。调度器直接读取各账号会话，无需浏览器切号；某账号失败后仍继续处理其他账号。Apple 已失效或撤销的会话无法靠本地保存恢复，需对该账号重新登录一次。多个账号建议使用独立浏览器个人资料保持登录。
+
+- 可选择执行账号、每账号每轮数量（1–20）、每个邮箱间隔（0–300 秒）、标签前缀。
+- 每轮间隔可设固定分钟数，或最小 / 最大分钟范围；上一轮结束后选定本轮等待时间。保存配置立即生效，不重置已排定的下一轮时间；新数量用于随后启动的任务，新间隔用于下一次重新计时。默认每轮 5 个、间隔 60–90 分钟，首次开关默认关闭。
+- 开启后先等待设定间隔；「立即执行一轮」异步提交任务，在开关关闭时也可只跑一轮。立即执行至少成功创建并配置 1 个邮箱才重置下一轮倒计时；全部失败时保留原计划（包括执行期间继续倒计时），自动定时轮次失败则正常安排下一轮，避免连续重试。任务与手动批量创建共用互斥队列，不会并行重复创建。
+- 关闭开关会取消下一轮，当前正在处理的邮箱完成后停止，不再开始下一个。Apple 限流或配置失败时保留成功结果，结束本账号本轮，按配置等待下一轮。
+- 页面显示北京时间、下次启动倒计时、每轮成功 / 失败数、最近 40 轮任务及 300 条日志，每轮提供「查看结果」弹窗、一键复制全部以及 TXT 下载；下载状态和最近下载时间会保存，刷新或重启后仍可查看。结果格式为 `邮箱----收件链接`，无成功结果时禁用查看和下载。
+- 配置、开关、下次时间、任务摘要和日志保存在忽略的 `results/auto_registration.json`。关闭网页不影响执行；重启服务恢复开关和等待时间。重启中断的轮次不会自动重复提交，已创建但未配完的邮箱可在邮箱列表补全。
+
+API：`GET/POST /api/auto-registration` 读取或更新配置；`POST /api/auto-registration/run` 提交单轮任务；`GET /api/auto-registration/export` 导出最近一轮成功结果；`GET /api/auto-registration/tasks/{job_id}` 查询指定轮次；`GET /api/auto-registration/tasks/{job_id}/export` 下载并记录该轮下载状态（仅允许已结束且有成功结果的任务）。原 `/api/scheduler/start`、`stop` 也使用同一调度器。
+
+## 文件结构
+
+```
+├── icloud_hme.py        # 核心库：Cookie 提取 / HME API / 账号身份提取
+├── account_manager.py   # 多账号管理器：CRUD / 批量创建 / 别名索引
+├── web_ui.py            # Flask Web 面板 + 内置调度器
+├── scheduler.py         # 独立命令行调度器
+└── requirements.txt     # pip 依赖
+```
+
+运行时生成：
+
+```
+accounts.json          # 所有账号及 Cookie（自动持久化）
+scheduler_state.json   # 调度器历史状态
+logs/                  # 运行日志
+results/               # 创建的邮箱列表
+```
+
+## 依赖
+
+```
+requests>=2.25          # HTTP
+pycryptodome>=3.15     # Chrome cookie 解密 (Windows)
+pywin32>=305           # Windows DPAPI (仅 Windows)
+flask>=3.0             # Web UI
+```
+
+## License
+
+MIT

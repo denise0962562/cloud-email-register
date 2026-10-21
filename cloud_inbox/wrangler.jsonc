@@ -1,0 +1,10 @@
+{
+  "name": "icloud-hme-inbox",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-21",
+  "account_id": "590fdd449ef786907252a2b62cbbfad0",
+  "workers_dev": true,
+  "routes": [{"pattern": "webmail.fastaiapi.cloud/m/*", "zone_name": "fastaiapi.cloud"}],
+  "d1_databases": [{"binding": "DB", "database_name": "temp-email-db", "database_id": "78b4d2b5-d766-4a4a-b5d6-ad5b967f3460"}],
+  "observability": {"enabled": false}
+}

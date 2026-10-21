@@ -1,0 +1,625 @@
+#!/usr/bin/env python3
+"""
+iCloud HME — 多账号管理器
+===========================
+管理多组 iCloud 账号及其隐私邮箱别名。
+
+功能:
+  - 账号 CRUD (增删改查)
+  - Cookie 导入解析 (Header String / JSON)
+  - 批量会话校验
+  - 别名按账号归属索引
+  - 跨账号并发/轮询创建
+
+用法:
+    from account_manager import AccountManager
+
+    mgr = AccountManager()
+    mgr.add_account("主号", cookie_header_string)
+    mgr.create_aliases_batch(["acc_xxx", "acc_yyy"], count_per_account=5)
+"""
+
+import json
+import os
+import tempfile
+import re
+import time
+import uuid
+import threading
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Any
+
+HERE = Path(__file__).resolve().parent
+ACCOUNTS_FILE = HERE / "accounts.json"
+OLD_COOKIES_FILE = HERE / "cookies.json"
+RESULTS_DIR = HERE / "results"
+LATEST_EMAILS = RESULTS_DIR / "latest_emails.txt"
+
+from mail_cache import get_cache  # noqa: E402
+
+
+class AccountManager:
+    """多账号管理器"""
+
+    def __init__(self):
+        self.accounts: Dict[str, Dict] = {}
+        self._lock = threading.RLock()
+        self._workflow_locks = {}
+        self._cache = get_cache()
+        self._load()
+
+    def _load(self):
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        if OLD_COOKIES_FILE.exists() and not ACCOUNTS_FILE.exists():
+            try:
+                self._migrate_old_cookies()
+            except Exception:
+                pass
+
+        if ACCOUNTS_FILE.exists():
+            try:
+                data = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
+                self.accounts = data.get("accounts", {})
+                for acc_id, account in self.accounts.items():
+                    session_path = self._session_path(acc_id)
+                    if session_path.exists():
+                        try:
+                            account["cookies"] = json.loads(session_path.read_text(encoding="utf-8"))["cookies"]
+                        except (ValueError, KeyError, OSError):
+                            account.update(cookies={}, status="error", _session_unreadable=True,
+                                           last_error="本账号会话文件无法读取，请重新导入；其他账号不受影响")
+                    elif not account.get("cookies"):
+                        account.update(cookies={}, status="error", last_error="本账号缺少登录会话，请重新导入")
+                self._save()  # Migrate legacy inline cookies into account-scoped files.
+            except (json.JSONDecodeError, OSError):
+                self.accounts = {}
+
+    def _save(self):
+        with self._lock:
+            safe_accounts = {}
+            for acc_id, account in self.accounts.items():
+                if not account.get("_session_unreadable"):
+                    session_path = self._session_path(acc_id)
+                    session_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    session_path.parent.chmod(0o700)
+                    self._write_private(session_path, {"cookies": account.get("cookies", {})})
+                safe_accounts[acc_id] = {k: v for k, v in account.items() if k != "cookies"}
+            self._write_private(ACCOUNTS_FILE, {"accounts": safe_accounts,
+                                               "updated_at": datetime.now().isoformat()})
+
+    @staticmethod
+    def _session_path(acc_id):
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", acc_id):
+            raise ValueError("账号 ID 无效")
+        return RESULTS_DIR / "account_sessions" / (acc_id + ".json")
+
+    @staticmethod
+    def _write_private(path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(data, stream, ensure_ascii=False, indent=2)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary): os.unlink(temporary)
+
+    def _migrate_old_cookies(self):
+        try:
+            old = json.loads(OLD_COOKIES_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(old, dict) or not old:
+            return
+
+        acc_id = self._generate_id()
+        self.accounts[acc_id] = {
+            "id": acc_id,
+            "name": "默认账号",
+            "real_email": "",
+            "cookies": old,
+            "host": "icloud.com",
+            "status": "active",
+            "alias_total": 0,
+            "alias_active": 0,
+            "last_validated": None,
+            "last_error": None,
+            "created_at": datetime.now().isoformat(),
+        }
+        self._save()
+        try:
+            OLD_COOKIES_FILE.rename(OLD_COOKIES_FILE.with_suffix(".json.bak"))
+        except OSError:
+            pass
+
+    def _generate_id(self) -> str:
+        return "acc_" + uuid.uuid4().hex[:8]
+
+    @staticmethod
+    def parse_cookie_input(raw: str) -> Dict[str, str]:
+        raw = raw.strip()
+        if not raw:
+            raise ValueError("空白输入 — 请粘贴 Cookie Header String 或 JSON")
+
+        if raw.startswith("{"):
+            try:
+                cookies = json.loads(raw)
+                if isinstance(cookies, dict):
+                    return {k: str(v) for k, v in cookies.items() if v}
+            except json.JSONDecodeError:
+                pass
+
+        cookies: Dict[str, str] = {}
+        for part in raw.split(";"):
+            part = part.strip()
+            if "=" in part:
+                name, value = part.split("=", 1)
+                name = name.strip()
+                value = value.strip()
+                if name:
+                    cookies[name] = value
+
+        if not cookies:
+            raise ValueError(
+                "无法解析 Cookie 输入。\n"
+                "请提供 Header String 格式 (name=value; ...) 或 JSON 格式"
+            )
+
+        return cookies
+
+    def add_account(
+        self, name: str, cookie_input: str, host: str = "icloud.com"
+    ) -> Dict:
+        from icloud_hme import ICloudHME
+
+        cookies = self.parse_cookie_input(cookie_input)
+        acc_id = self._generate_id()
+
+        account: Dict[str, Any] = {
+            "id": acc_id,
+            "name": name,
+            "real_email": "",
+            "icloud_email": "",
+            "cookies": cookies,
+            "host": host,
+            "status": "active",
+            "alias_total": 0,
+            "alias_active": 0,
+            "last_validated": None,
+            "last_error": None,
+            "created_at": datetime.now().isoformat(),
+        }
+
+        try:
+            client = ICloudHME(cookies, host=host, verbose=False)
+            client.validate_session()
+            info = client.get_account_info()
+            if info:
+                account["real_email"] = (
+                    info.get("appleId", "")
+                    or info.get("primaryEmail", "")
+                )
+                account["icloud_email"] = self._derive_icloud_email(info)
+
+            try:
+                aliases = client.list_aliases()
+                account["alias_total"] = len(aliases)
+                account["alias_active"] = sum(
+                    1 for a in aliases if a.get("active")
+                )
+            except Exception:
+                pass
+
+            account["last_validated"] = datetime.now().isoformat()
+            account["last_error"] = None
+        except Exception as e:
+            account["status"] = "error"
+            account["last_error"] = str(e)[:300]
+
+        self.accounts[acc_id] = account
+        self._save()
+        return account
+
+    def remove_account(self, acc_id: str) -> bool:
+        if acc_id in self.accounts:
+            del self.accounts[acc_id]
+            self._save()
+            return True
+        return False
+
+    def get_account(self, acc_id: str) -> Optional[Dict]:
+        return self.accounts.get(acc_id)
+
+    def list_accounts(self) -> List[Dict]:
+        return sorted(
+            self.accounts.values(),
+            key=lambda a: (a.get("status") != "active", a.get("created_at", "")),
+        )
+
+    def update_account(self, acc_id: str, **kwargs) -> Optional[Dict]:
+        with self._lock:
+            if acc_id in self.accounts:
+                self.accounts[acc_id].update(kwargs)
+                if "cookies" in kwargs:
+                    self.accounts[acc_id].pop("_session_unreadable", None)
+                self._save()
+                return dict(self.accounts[acc_id])
+            return None
+
+    @staticmethod
+    def _derive_icloud_email(info: Dict) -> str:
+        primary = str(info.get("primaryEmail", "") or "").strip()
+        apple_id = str(info.get("appleId", "") or "").strip()
+
+        if primary and ("@icloud.com" in primary or "@me.com" in primary or "@mac.com" in primary):
+            return primary
+
+        if apple_id and ("@icloud.com" in apple_id or "@me.com" in apple_id or "@mac.com" in apple_id):
+            return apple_id
+
+        if apple_id and "@" in apple_id:
+            local = apple_id.split("@")[0]
+            return f"{local}@icloud.com"
+
+        return primary or apple_id
+
+    def validate_account(self, acc_id: str) -> Dict:
+        from icloud_hme import ICloudHME
+
+        account = self.accounts.get(acc_id)
+        if not account:
+            raise KeyError(f"账号不存在: {acc_id}")
+
+        try:
+            client = self.get_client(acc_id, verbose=False)
+            client.validate_session()
+            info = client.get_account_info()
+            if info:
+                if account.get("real_email") and info.get("appleId", "").lower() != account["real_email"].lower():
+                    raise RuntimeError("账号会话身份不匹配，拒绝覆盖原账号")
+                account["real_email"] = (
+                    info.get("appleId", "")
+                    or info.get("primaryEmail", "")
+                )
+                existing = account.get("icloud_email", "")
+                is_icloud = existing and any(
+                    d in existing for d in ("@icloud.com", "@me.com", "@mac.com")
+                )
+                if not is_icloud:
+                    account["icloud_email"] = self._derive_icloud_email(info)
+
+            aliases = client.list_aliases()
+            account["alias_total"] = len(aliases)
+            account["alias_active"] = sum(
+                1 for a in aliases if a.get("active")
+            )
+            account["status"] = "active"
+            account["last_validated"] = datetime.now().isoformat()
+            account["last_error"] = None
+        except Exception as e:
+            account["status"] = "error"
+            account["last_error"] = str(e)[:300]
+
+        self._save()
+        return account
+
+    def validate_all(self) -> List[Dict]:
+        results: List[Dict] = []
+        for acc_id in list(self.accounts.keys()):
+            try:
+                account = self.validate_account(acc_id)
+                results.append({
+                    "id": acc_id,
+                    "ok": account.get("status") == "active",
+                    "email": account.get("real_email", ""),
+                    "alias_total": account.get("alias_total", 0),
+                })
+            except Exception as e:
+                results.append({
+                    "id": acc_id,
+                    "ok": False,
+                    "error": str(e)[:200],
+                })
+        return results
+
+    def get_client(self, acc_id: str, verbose: bool = False):
+        from icloud_hme import ICloudHME
+
+        account = self.accounts.get(acc_id)
+        if not account:
+            raise KeyError(f"账号不存在: {acc_id}")
+        baseline = dict(account["cookies"])
+
+        def save_updates(updates):
+            with self._lock:
+                current = self.accounts.get(acc_id)
+                # A client opened before a session replacement must never overwrite it.
+                if not current or current.get("cookies") != baseline:
+                    return
+                current["cookies"].update(updates)
+                baseline.update(updates)
+                self._save()
+
+        return ICloudHME(
+            dict(baseline),
+            host=account.get("host", "icloud.com"),
+            verbose=verbose,
+            on_cookie_update=save_updates,
+        )
+
+    def set_app_password(self, acc_id: str, app_password: str):
+        with self._lock:
+            if acc_id not in self.accounts:
+                raise KeyError(f"账号不存在: {acc_id}")
+            self.accounts[acc_id]["app_password"] = app_password
+            self._save()
+
+    def get_mail_client(self, acc_id: str, verbose: bool = False):
+        from icloud_mail import ICloudMail
+
+        account = self.accounts.get(acc_id)
+        if not account:
+            raise KeyError(f"账号不存在: {acc_id}")
+        app_pwd = account.get("app_password", "")
+        imap_email = account.get("icloud_email", "")
+        if not imap_email:
+            real = account.get("real_email", "")
+            if real and any(d in real for d in ("@icloud.com", "@me.com", "@mac.com")):
+                imap_email = real
+            else:
+                raise ValueError(
+                    "未设置 iCloud 邮箱。\n"
+                    "Apple ID ({}) 不是 iCloud 地址，\n"
+                    "请点击下方按钮输入你的 @icloud.com 邮箱".format(
+                        account.get("real_email", "?")
+                    )
+                )
+        if not app_pwd:
+            raise ValueError(
+                "未设置 App 专用密码。\n"
+                "请点击下方按钮，输入 @icloud.com 邮箱和应用密码"
+            )
+        return ICloudMail(imap_email, app_pwd, verbose=verbose)
+
+    def check_inbox(self, acc_id: str, limit: int = 50, days: int = 7,
+                    force: bool = False) -> List[Dict]:
+        cached = self._cache.get_inbox(acc_id)
+        age = self._cache.cache_age_seconds(acc_id)
+
+        if not force and cached and age < 300:
+            return cached[-limit:]
+
+        try:
+            mail = self.get_mail_client(acc_id)
+            new_msgs = mail.check_inbox(limit=50, days=days)
+            mail.disconnect()
+        except Exception:
+            new_msgs = []
+
+        if new_msgs:
+            self._cache.set_inbox(acc_id, new_msgs)
+
+        return self._cache.get_inbox(acc_id)[-limit:]
+
+    def check_alias_mail(self, acc_id: str, alias_email: str,
+                         limit: int = 20, days: int = 30,
+                         force: bool = False) -> List[Dict]:
+        cached = self._cache.get_alias_mail(acc_id, alias_email)
+        age = self._cache.cache_age_seconds(acc_id)
+
+        if not force and cached and age < 300:
+            return cached[-limit:]
+
+        try:
+            mail = self.get_mail_client(acc_id)
+            new_msgs = mail.find_by_recipient(alias_email, limit=20, days=days)
+            mail.disconnect()
+        except Exception:
+            new_msgs = []
+
+        if new_msgs:
+            self._cache.set_alias_mail(acc_id, alias_email, new_msgs)
+
+        return self._cache.get_alias_mail(acc_id, alias_email)[-limit:]
+
+    def check_all_aliases_mail(self, acc_id: str, limit_per: int = 5,
+                               days: int = 14,
+                               force: bool = False) -> Dict[str, List[Dict]]:
+        cached = self._cache.get_all_alias_mail(acc_id)
+        age = self._cache.cache_age_seconds(acc_id)
+
+        if not force and cached and age < 300:
+            results = {}
+            for alias, msgs in cached.items():
+                results[alias] = msgs[-limit_per:]
+            return results
+
+        from icloud_hme import ICloudHME
+
+        try:
+            client = self.get_client(acc_id, verbose=False)
+            aliases = client.list_aliases()
+        except Exception:
+            return cached if cached else {}
+
+        alias_set = {a.get("email", "").lower() for a in aliases if a.get("email")}
+        if not alias_set:
+            return cached if cached else {}
+
+        try:
+            mail = self.get_mail_client(acc_id)
+            all_inbox = mail.check_inbox(limit=100, days=days)
+            mail.disconnect()
+        except Exception:
+            return cached if cached else {}
+
+        results: Dict[str, List[Dict]] = {}
+        for msg in all_inbox:
+            to_field = msg.get("to", "").lower()
+            for alias in alias_set:
+                if alias and alias in to_field:
+                    if alias not in results:
+                        results[alias] = []
+                    if len(results[alias]) < limit_per:
+                        results[alias].append(msg)
+                    break
+
+        if results:
+            self._cache.set_alias_mail_batch(acc_id, results)
+
+        return results
+
+    def test_imap_connection(self, acc_id: str) -> Dict:
+        try:
+            mail = self.get_mail_client(acc_id)
+            result = mail.test_connection()
+            mail.disconnect()
+            return result
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:200]}
+
+    def _workflow_lock(self, acc_id):
+        with self._lock:
+            return self._workflow_locks.setdefault(acc_id, threading.RLock())
+
+    def setup_alias_inbox(self, acc_id: str, email: str) -> Dict:
+        from mail_provisioning import MailProvisioner
+        with self._workflow_lock(acc_id):
+            client = self.get_client(acc_id, verbose=False)
+            provisioner = MailProvisioner(client)
+            provisioner.prepare()
+            aliases = client.list_aliases()
+            if not any(a.get("email", "").lower() == email.lower() and a.get("active") for a in aliases):
+                raise ValueError("该邮箱不是此账号的活跃隐藏地址")
+            record = provisioner.provision(email, acc_id)
+            return {"email": email, "account_id": acc_id, "ok": True,
+                    "inbox_url": record["inbox_url"], "line": email + "----" + record["inbox_url"]}
+
+    def create_aliases_for_account(
+        self, acc_id: str, count: int = 1, label: str = ""
+    ) -> List[Dict]:
+        from mail_provisioning import MailProvisioner
+        if not isinstance(count, int) or not 1 <= count <= 50:
+            raise ValueError("创建数量必须为 1 到 50")
+        account = self.accounts.get(acc_id)
+        if not account:
+            raise KeyError(f"账号不存在: {acc_id}")
+        with self._workflow_lock(acc_id):
+            client = self.get_client(acc_id, verbose=False)
+            provisioner = MailProvisioner(client)
+            provisioner.prepare()
+            results = []
+            for i in range(count):
+                email = None
+                try:
+                    alias_label = label or f"{account.get('name', acc_id)} {datetime.now().strftime('%m%d%H%M')}-{i + 1}"
+                    result = client.create_alias(label=alias_label, max_retries=1)
+                    email = result.get("email", "")
+                    if not email:
+                        raise RuntimeError("iCloud 未返回有效邮箱")
+                    # Persist the alias before any subsequent network operation.
+                    with self._lock:
+                        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+                        with open(str(LATEST_EMAILS), "a", encoding="utf-8") as f:
+                            f.write(f"{email}\t{acc_id}\n")
+                        account["alias_total"] = account.get("alias_total", 0) + 1
+                        account["alias_active"] = account.get("alias_active", 0) + 1
+                        self._save()
+                    record = provisioner.provision(email, acc_id)
+                    results.append({"email": email, "account_id": acc_id, "ok": True,
+                                    "alias_created": True, "inbox_url": record["inbox_url"],
+                                    "line": email + "----" + record["inbox_url"]})
+                except Exception as error:
+                    results.append({"email": email, "account_id": acc_id, "ok": False,
+                                    "alias_created": bool(email), "error": str(error)[:250]})
+                    # Stop on a partial setup failure so a batch cannot leave many orphan aliases.
+                    break
+            return results
+
+    def create_aliases_batch(
+        self,
+        account_ids: List[str],
+        count_per_account: int = 1,
+        interval_sec: float = 3.0,
+        label: str = "",
+    ) -> Dict[str, List[Dict]]:
+        all_results: Dict[str, List[Dict]] = {}
+        for i, acc_id in enumerate(account_ids):
+            if acc_id not in self.accounts:
+                all_results[acc_id] = [{
+                    "email": None, "account_id": acc_id,
+                    "ok": False, "error": "账号不存在",
+                }]
+                continue
+            if self.accounts[acc_id].get("status") != "active":
+                all_results[acc_id] = [{
+                    "email": None, "account_id": acc_id,
+                    "ok": False, "error": "账号不可用",
+                }]
+                continue
+
+            results = self.create_aliases_for_account(
+                acc_id, count_per_account, label
+            )
+            all_results[acc_id] = results
+
+            if i < len(account_ids) - 1 and interval_sec > 0:
+                time.sleep(interval_sec)
+
+        return all_results
+
+    def get_aliases_for_account(self, acc_id: str) -> List[Dict]:
+        try:
+            client = self.get_client(acc_id, verbose=False)
+            return client.list_aliases()
+        except Exception:
+            return []
+
+    def get_all_aliases(self) -> List[Dict]:
+        all_aliases: List[Dict] = []
+        for acc_id, account in self.accounts.items():
+            for alias in self.get_aliases_for_account(acc_id):
+                alias["account_id"] = acc_id
+                alias["account_name"] = account.get("name", "")
+                alias["account_email"] = account.get("real_email", "")
+                all_aliases.append(alias)
+        return all_aliases
+
+    def get_summary(self) -> Dict:
+        total_aliases = sum(
+            a.get("alias_total", 0) for a in self.accounts.values()
+        )
+        total_active = sum(
+            a.get("alias_active", 0) for a in self.accounts.values()
+        )
+        active_accounts = sum(
+            1 for a in self.accounts.values() if a.get("status") == "active"
+        )
+        error_accounts = sum(
+            1 for a in self.accounts.values() if a.get("status") == "error"
+        )
+        return {
+            "account_count": len(self.accounts),
+            "active_accounts": active_accounts,
+            "error_accounts": error_accounts,
+            "total_aliases": total_aliases,
+            "total_active_aliases": total_active,
+        }
+
+
+if __name__ == "__main__":
+    print("AccountManager 自测")
+    mgr = AccountManager()
+    summary = mgr.get_summary()
+    print(f"当前账号数: {summary['account_count']}")
+    
+    header = "X_APPLE_WEB_KB=abc123; SESSION_TOKEN=xyz789"
+    parsed = mgr.parse_cookie_input(header)
+    print(f"Header String → {len(parsed)} 个 cookie")
+    
+    json_in = '{"X_APPLE_WEB_KB":"abc123","SESSION_TOKEN":"xyz789"}'
+    parsed2 = mgr.parse_cookie_input(json_in)
+    print(f"JSON → {len(parsed2)} 个 cookie")
+    
+    print("自测完成 ✓")
