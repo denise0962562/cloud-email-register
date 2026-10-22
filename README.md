@@ -85,7 +85,7 @@ python icloud_hme.py delete --email xxx@icloud.com --cookies cookies.json
 - **Header String**：`name1=value1; name2=value2; ...`
 - **JSON**：`{"name1":"value1", "name2":"value2"}`
 
-导入后自动持久化到 `accounts.json`，重启无需重新粘贴。
+导入后自动持久化到项目目录 `icloud_hme.sqlite3`，重启无需重新粘贴。
 
 ## 一键创建与收件链接
 
@@ -119,20 +119,20 @@ python icloud_hme.py delete --email xxx@icloud.com --cookies cookies.json
 
 Cloudflare 页面只保存独立域名收件箱的读取凭据，不接收 Apple 登录 Cookie。`results/cloud_inbox_config.json` 保存本机注册链接所需的管理令牌，需完成首次 Cloudflare 部署后配置。首次部署使用 `cloud_inbox/wrangler.jsonc`，新 Worker 仅接管 `/m/*` 路由，保留已有临时邮箱站点；`schema.sql` 仅新增 `hme_public_inboxes` 表。
 
-映射与恢复进度保存在被 Git 忽略的 `results/inbox_links.json`，默认仅当前用户可读写。导出内容含收件凭据，持链接者可以访问对应的独立收件箱。服务应保持仅本机访问。Web 界面、AccountManager 和调度器走完整流程；`icloud_hme.py create` 为底层仅创建别名的 CLI。
+映射与恢复进度保存在被 Git 忽略的 `icloud_hme.sqlite3` 的 `inbox_links` 表，数据库文件权限为 600。导出内容含收件凭据，持链接者可以访问对应的独立收件箱。服务应保持仅本机访问。Web 界面、AccountManager 和调度器走完整流程；`icloud_hme.py create` 为底层仅创建别名的 CLI。
 
 ## 自动注册页面
 
 打开 `http://127.0.0.1:5050/auto`，或点击管理面板的「自动注册」。该页面创建的是 iCloud 隐藏邮箱，并自动配置转发和专属收件链接。
 
-账号 Cookie 分别存放在 `results/account_sessions/<账号ID>.json`（目录权限 700、文件权限 600），`accounts.json` 仅保存账号元数据；旧版内嵌 Cookie 会自动迁移。每个客户端有独立的 Cookie 副本和 HTTP 会话，Apple 成功响应中的 Cookie 更新只保存回所属账号，已替换会话不会被旧客户端覆盖。调度器直接读取各账号会话，无需浏览器切号；某账号失败后仍继续处理其他账号。Apple 已失效或撤销的会话无法靠本地保存恢复，需对该账号重新登录一次。多个账号建议使用独立浏览器个人资料保持登录。
+账号元数据和 Cookie 分别存放在 SQLite 的 `accounts`、`account_sessions` 表，登录态按账号 ID 独立存储，并通过外键关联；旧版 JSON 和独立会话文件只导入一次，之后不再写入。每个客户端有独立的 Cookie 副本和 HTTP 会话，Apple 成功响应中的 Cookie 更新只保存回所属账号，已替换会话不会被旧客户端覆盖。调度器直接读取各账号会话，无需浏览器切号；某账号失败后仍继续处理其他账号。Apple 已失效或撤销的会话无法靠本地保存恢复，需对该账号重新登录一次。多个账号建议使用独立浏览器个人资料保持登录。
 
 - 可选择执行账号、每账号每轮数量（1–20）、每个邮箱间隔（0–300 秒）、标签前缀。
 - 每轮间隔可设固定分钟数，或最小 / 最大分钟范围；上一轮结束后选定本轮等待时间。保存配置立即生效，不重置已排定的下一轮时间；新数量用于随后启动的任务，新间隔用于下一次重新计时。默认每轮 5 个、间隔 60–90 分钟，首次开关默认关闭。
 - 开启后先等待设定间隔；「立即执行一轮」异步提交任务，在开关关闭时也可只跑一轮。立即执行至少成功创建并配置 1 个邮箱才重置下一轮倒计时；全部失败时保留原计划（包括执行期间继续倒计时），自动定时轮次失败则正常安排下一轮，避免连续重试。任务与手动批量创建共用互斥队列，不会并行重复创建。
 - 关闭开关会取消下一轮，当前正在处理的邮箱完成后停止，不再开始下一个。Apple 限流或配置失败时保留成功结果，结束本账号本轮，按配置等待下一轮。
 - 页面显示北京时间、下次启动倒计时、每轮成功 / 失败数、最近 40 轮任务及 300 条日志，每轮提供「查看结果」弹窗、一键复制全部以及 TXT 下载；下载状态和最近下载时间会保存，刷新或重启后仍可查看。结果格式为 `邮箱----收件链接`，无成功结果时禁用查看和下载。
-- 配置、开关、下次时间、任务摘要和日志保存在忽略的 `results/auto_registration.json`。关闭网页不影响执行；重启服务恢复开关和等待时间。重启中断的轮次不会自动重复提交，已创建但未配完的邮箱可在邮箱列表补全。
+- 配置、开关、下次时间、任务摘要和日志保存在忽略的 `icloud_hme.sqlite3`。任务历史和下载状态持久化到 `tasks` 表，旧任务超出页面最近 40 轮后仍可按任务 ID 查询和导出。关闭网页不影响执行；重启服务恢复开关和等待时间。重启中断的轮次不会自动重复提交，已创建但未配完的邮箱可在邮箱列表补全。
 
 API：`GET/POST /api/auto-registration` 读取或更新配置；`POST /api/auto-registration/run` 提交单轮任务；`GET /api/auto-registration/export` 导出最近一轮成功结果；`GET /api/auto-registration/tasks/{job_id}` 查询指定轮次；`GET /api/auto-registration/tasks/{job_id}/export` 下载并记录该轮下载状态（仅允许已结束且有成功结果的任务）。原 `/api/scheduler/start`、`stop` 也使用同一调度器。
 
@@ -149,7 +149,7 @@ API：`GET/POST /api/auto-registration` 读取或更新配置；`POST /api/auto-
 运行时生成：
 
 ```
-accounts.json          # 所有账号及 Cookie（自动持久化）
+icloud_hme.sqlite3      # 账号、独立登录态、邮箱链接、任务和邮件缓存
 scheduler_state.json   # 调度器历史状态
 logs/                  # 运行日志
 results/               # 创建的邮箱列表
@@ -167,3 +167,20 @@ flask>=3.0             # Web UI
 ## License
 
 MIT
+
+## SQLite 存储与迁移
+
+数据库位置固定为项目根目录 `icloud_hme.sqlite3`，使用 Python 标准库 sqlite3，无需单独安装数据库服务。写入使用事务、外键和 WAL；账号会话更新使用条件写入，旧客户端不能覆盖已经替换的新会话。数据库及其 WAL/SHM 文件已加入 Git 忽略规则。
+
+主要表：`accounts`（账号元数据）、`account_sessions`（按账号独立的 Cookie）、`email_records`（创建记录）、`inbox_links`（完整收件映射和恢复进度）、`tasks`（每轮结果和下载状态）、`task_logs`（日志）、`documents`（调度配置、原始异步任务、缓存和服务配置）、`legacy_sources`（原始文件的逐字节归档）。
+
+迁移入口为 `python migrate_sqlite.py`。部署迁移前应停止服务并备份；脚本按模块事务导入、记录已完成标记，并核对账号、会话、邮箱顺序、完整收件凭据、任务配置、日志和历史是否一致。重复导入不会覆盖数据库中新数据。旧 JSON/TXT 文件保留作迁移前恢复材料，修改旧文件不会更新运行数据。TXT/CSV 仍是独立导出文件。
+
+运行中的数据库请用 SQLite 在线备份，不能只复制主文件而漏掉 WAL。例如：
+
+```python
+from storage import Storage
+Storage().backup("backup/icloud_hme_snapshot.sqlite3")  # 目标文件需尚不存在
+```
+
+恢复时先停止服务，保留当前数据库及 WAL/SHM 作为回退材料，再用备份替换数据库。原始迁移备份还包含旧版代码，可完整回退到迁移前版本。

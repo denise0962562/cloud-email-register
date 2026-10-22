@@ -39,14 +39,19 @@ def setup_logging(verbose: bool = True) -> logging.Logger:
     logger.addHandler(fh); logger.addHandler(ch)
     return logger
 
+def state_storage():
+    from storage import Storage, database_for
+    store = Storage(database_for(STATE_FILE))
+    store.import_document("scheduler", STATE_FILE)
+    return store
+
+
 def load_state() -> Dict:
-    if STATE_FILE.exists():
-        try: return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except: pass
-    return {"total_created": 0, "rounds": [], "last_error": None}
+    return state_storage().read_document("scheduler") or {"total_created": 0, "rounds": [], "last_error": None}
+
 
 def save_state(state: Dict):
-    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    state_storage().write_document("scheduler", state)
 
 class CreateRound:
     def __init__(self):
@@ -108,7 +113,7 @@ def save_round_result(round_result: CreateRound, logger: logging.Logger):
     lines = export_lines(round_result.created)
     if lines:
         (RESULT_DIR / f"round_{ts}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    result_file.write_text(json.dumps({"start_time":round_result.start_time.isoformat(),"end_time":round_result.end_time.isoformat() if round_result.end_time else None,"created_count":len(round_result.created),"created":round_result.created,"errors":round_result.errors,"hit_limit":round_result.hit_limit,"fatal_error":round_result.fatal_error}, indent=2, ensure_ascii=False), encoding="utf-8")
+    state_storage().write_document("legacy_round", {"start_time":round_result.start_time.isoformat(),"end_time":round_result.end_time.isoformat() if round_result.end_time else None,"created_count":len(round_result.created),"created":round_result.created,"errors":round_result.errors,"hit_limit":round_result.hit_limit,"fatal_error":round_result.fatal_error}, key=result_file.name)
 
 def wait_interval(logger: logging.Logger, seconds: float = 3600):
     target = datetime.now() + timedelta(seconds=seconds)

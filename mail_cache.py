@@ -4,7 +4,7 @@ iCloud HME — 邮件本地缓存
 ===========================
 一次拉取终身存储，增量更新，去重合并。
 
-存储: results/mail_cache.json
+存储: 项目目录 icloud_hme.sqlite3
 """
 
 import json
@@ -12,6 +12,8 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from storage import Storage, database_for
 
 HERE = Path(__file__).resolve().parent
 CACHE_FILE = HERE / "results" / "mail_cache.json"
@@ -26,19 +28,13 @@ class MailCache:
         self._load()
 
     def _load(self):
-        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if CACHE_FILE.exists():
-            try:
-                self._data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-            except Exception:
-                self._data = {}
+        self.storage = Storage(database_for(CACHE_FILE))
+        self.storage.import_document("mail_cache", CACHE_FILE)
+        self._data = self.storage.read_document("mail_cache") or {}
 
     def _save(self):
         with self._lock:
-            CACHE_FILE.write_text(
-                json.dumps(self._data, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            self.storage.write_document("mail_cache", self._data)
 
     def _ensure_account(self, acc_id: str):
         if acc_id not in self._data:

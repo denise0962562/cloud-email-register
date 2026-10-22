@@ -21,12 +21,14 @@ class AccountSessionsTest(unittest.TestCase):
                         'acc_b': {'id': 'acc_b', 'real_email': 'b@example.com', 'cookies': {'token': 'B'}}}
         (self.root / 'accounts.json').write_text(json.dumps({'accounts': self.records}))
 
-    def test_migration_persists_two_separate_private_sessions_and_reloads(self):
+    def test_migration_persists_two_private_database_rows_and_reloads(self):
+        original = (self.root / 'accounts.json').read_bytes()
         manager = module.AccountManager()
-        disk = json.loads((self.root / 'accounts.json').read_text())
-        self.assertNotIn('cookies', disk['accounts']['acc_a'])
-        for key in self.records:
-            self.assertEqual(manager._session_path(key).stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.root / 'accounts.json').read_bytes(), original)
+        with manager.storage.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM account_sessions').fetchone()[0], 2)
+            self.assertNotIn('cookies', json.loads(db.execute('SELECT data FROM accounts WHERE id=?', ('acc_a',)).fetchone()[0]))
+        self.assertEqual(manager.storage.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(module.AccountManager().accounts['acc_b']['cookies'], {'token': 'B'})
 
     def test_cookie_rotation_and_stale_client_cannot_change_other_or_new_session(self):
@@ -41,13 +43,13 @@ class AccountSessionsTest(unittest.TestCase):
         self.assertEqual(reloaded.accounts['acc_a']['cookies']['token'], 'A-login-again')
         self.assertEqual(reloaded.accounts['acc_b']['cookies']['token'], 'B')
 
-    def test_corrupt_session_only_disables_its_own_account(self):
+    def test_legacy_files_do_not_overwrite_database_after_migration(self):
         manager = module.AccountManager()
-        manager._session_path('acc_a').write_text('{broken')
+        manager.update_account('acc_a', cookies={'token': 'new-session'})
+        (self.root / 'accounts.json').write_text('{broken')
         reloaded = module.AccountManager()
-        self.assertEqual(reloaded.accounts['acc_a']['status'], 'error')
+        self.assertEqual(reloaded.accounts['acc_a']['cookies'], {'token': 'new-session'})
         self.assertEqual(reloaded.accounts['acc_b']['cookies'], {'token': 'B'})
-        self.assertEqual(manager._session_path('acc_a').read_text(), '{broken')
 
     def test_clients_do_not_share_mutable_cookie_jars(self):
         manager = module.AccountManager()

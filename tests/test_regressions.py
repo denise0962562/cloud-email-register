@@ -14,7 +14,7 @@ def test_parse_cookie_header_string():
     """Cookie Header String 格式解析"""
     from account_manager import AccountManager
     mgr = AccountManager()
-    
+
     raw = "X_APPLE_WEB_KB=abc123; SESSION_TOKEN=xyz789"
     cookies = mgr.parse_cookie_input(raw)
     assert len(cookies) == 2
@@ -27,7 +27,7 @@ def test_parse_cookie_json():
     """JSON 格式 Cookie 解析"""
     from account_manager import AccountManager
     mgr = AccountManager()
-    
+
     raw = '{"X_APPLE_WEB_KB":"abc123","SESSION_TOKEN":"xyz789"}'
     cookies = mgr.parse_cookie_input(raw)
     assert len(cookies) == 2
@@ -39,7 +39,7 @@ def test_parse_empty_input():
     """空输入应抛出 ValueError"""
     from account_manager import AccountManager
     mgr = AccountManager()
-    
+
     try:
         mgr.parse_cookie_input("")
         assert False, "应该抛出 ValueError"
@@ -78,30 +78,33 @@ def test_derive_icloud_email_third_party():
 def test_mail_cache_basic():
     """邮件缓存基本读写"""
     from mail_cache import MailCache
-    cache = MailCache()
-    
-    emails = [
-        {"id": "1", "from": "a@b.com", "to": "x@icloud.com", "subject": "Hello", "date": "2025-01-01T00:00:00"},
-        {"id": "2", "from": "c@d.com", "to": "y@icloud.com", "subject": "World", "date": "2025-01-02T00:00:00"},
-        {"id": "1", "from": "a@b.com", "to": "x@icloud.com", "subject": "Hello Duplicate", "date": "2025-01-03T00:00:00"},
-    ]
-    
-    cache.set_inbox("test_acc", emails)
-    cached = cache.get_inbox("test_acc")
-    
-    # 应该有 2 封（第 3 封 id 重复被去重）
-    assert len(cached) == 2, f"期望 2 封，实际 {len(cached)}"
-    
-    # 清理
-    cache.clear_account("test_acc")
-    assert len(cache.get_inbox("test_acc")) == 0
-    print("  PASS test_mail_cache_basic")
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as folder, patch('mail_cache.CACHE_FILE', Path(folder) / 'mail_cache.json'):
+        cache = MailCache()
+
+        emails = [
+            {"id": "1", "from": "a@b.com", "to": "x@icloud.com", "subject": "Hello", "date": "2025-01-01T00:00:00"},
+            {"id": "2", "from": "c@d.com", "to": "y@icloud.com", "subject": "World", "date": "2025-01-02T00:00:00"},
+            {"id": "1", "from": "a@b.com", "to": "x@icloud.com", "subject": "Hello Duplicate", "date": "2025-01-03T00:00:00"},
+        ]
+
+        cache.set_inbox("test_acc", emails)
+        cached = cache.get_inbox("test_acc")
+
+        # 应该有 2 封（第 3 封 id 重复被去重）
+        assert len(cached) == 2, f"期望 2 封，实际 {len(cached)}"
+
+        # 清理
+        cache.clear_account("test_acc")
+        assert len(cache.get_inbox("test_acc")) == 0
+        print("  PASS test_mail_cache_basic")
 
 
 def test_strip_html():
     """HTML 标签剥离"""
     from icloud_mail import _strip_html
-    
+
     html = "<html><body><p>Hello</p><br><div>World</div></body></html>"
     text = _strip_html(html)
     assert "Hello" in text
@@ -114,7 +117,7 @@ def test_strip_html():
 def test_strip_html_with_link():
     """HTML 链接保留文字"""
     from icloud_mail import _strip_html
-    
+
     html = '<a href="https://example.com">Click here</a>'
     text = _strip_html(html)
     assert "Click here" in text
@@ -145,10 +148,10 @@ if __name__ == "__main__":
         ("strip_html_with_link", test_strip_html_with_link),
         ("icloud_hme_account_info", test_icloud_hme_account_info),
     ]
-    
+
     passed = 0
     failed = 0
-    
+
     for name, fn in tests:
         try:
             fn()
@@ -156,9 +159,9 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"  FAIL {name}: {e}")
             failed += 1
-    
+
     print(f"\n{'='*40}")
     print(f"结果: {passed} 通过, {failed} 失败")
-    
+
     if failed:
         sys.exit(1)

@@ -183,16 +183,16 @@ class AutoRegistrationTest(unittest.TestCase):
         self.assertEqual(restored.history[0]["status"], "interrupted")
         self.assertGreater(restored.next_run, self.now)
         self.assertTrue(restored.logs)
-        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.auto.storage.path.stat().st_mode & 0o777, 0o600)
 
     def test_invalid_configuration_does_not_mutate_saved_state(self):
         self.enable()
-        before = self.path.read_text()
+        before = self.auto.storage.read_document("auto")
         for data in ({"count": True}, {"count": 0}, {"min_minutes": 100, "max_minutes": 2},
                      {"account_ids": ["bad"]}, {"interval_mode": "wrong"}, {"enabled": 1},
                      {"min_minutes": 0}, {"item_interval_seconds": -1}, None):
             with self.assertRaises(ValueError): self.auto.configure(data)
-            self.assertEqual(self.path.read_text(), before)
+            self.assertEqual(self.auto.storage.read_document("auto"), before)
 
     def test_api_returns_async_job_and_validates_config(self):
         client = web_ui.app.test_client()

@@ -1,14 +1,13 @@
 """Persistent interval scheduling over the same asynchronous creation job queue."""
 import copy
-import json
 import math
-import os
 import random
-import tempfile
 import threading
 import time
 from pathlib import Path
 
+
+from storage import Storage, database_for
 
 DEFAULTS = {"enabled": False, "account_ids": [], "count": 5, "interval_mode": "random",
             "interval_minutes": 60, "min_minutes": 60, "max_minutes": 90,
@@ -26,8 +25,10 @@ class AutoRegistration:
         self.next_run = None
         self.current = None
         self.history, self.logs = [], []
-        if self.path.exists():
-            data = json.loads(self.path.read_text())
+        self.storage = Storage(database_for(self.path))
+        self.storage.import_document("auto", self.path)
+        data = self.storage.read_document("auto")
+        if data is not None:
             self.config.update(data.get("config", {}))
             self.next_run = data.get("next_run")
             self.history, self.logs = data.get("history", [])[-40:], data.get("logs", [])[-300:]
@@ -52,15 +53,8 @@ class AutoRegistration:
         self.logs = self.logs[-300:]
 
     def persist(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, name = tempfile.mkstemp(dir=self.path.parent)
-        try:
-            with os.fdopen(fd, "w") as stream:
-                json.dump({"config": self.config, "next_run": self.next_run, "current": self.current,
-                           "history": self.history[:40], "logs": self.logs}, stream, ensure_ascii=False)
-            os.replace(name, self.path)
-        finally:
-            if os.path.exists(name): os.unlink(name)
+        self.storage.save_auto({"config": self.config, "next_run": self.next_run, "current": self.current,
+                                "history": self.history[:40], "logs": self.logs})
 
     def configure(self, data):
         with self.lock:
@@ -169,16 +163,20 @@ class AutoRegistration:
             for task in ([self.current] if self.current else []) + self.history:
                 if task["job_id"] == job_id:
                     return copy.deepcopy(task)
-            raise KeyError("任务不存在或已超出保留范围")
+            archived = self.storage.get_task(job_id)
+            if archived is not None:
+                return archived
+            raise KeyError("任务不存在")
 
     def download_task(self, job_id):
         with self.lock:
             task = self.get_task(job_id)
             if task["status"] == "running": raise ValueError("请等待本轮完成后下载")
             if not task.get("lines"): raise ValueError("本轮没有成功结果可下载")
-            stored = next(row for row in self.history if row["job_id"] == job_id)
+            stored = next((row for row in self.history if row["job_id"] == job_id), task)
             stored.update(downloaded=True, downloaded_at=self.clock(),
                           download_count=stored.get("download_count", 0) + 1)
+            self.storage.save_task(stored)
             self.persist()
             return copy.deepcopy(stored)
 

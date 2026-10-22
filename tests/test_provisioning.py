@@ -186,7 +186,7 @@ class ProvisioningTest(unittest.TestCase):
                 self.assertEqual(client.create_alias.call_count, 1)
                 self.assertTrue(result[0]["alias_created"])
                 self.assertFalse(result[0]["ok"])
-                self.assertEqual((directory / "latest.txt").read_text(), "one@icloud.com\taccount-1\n")
+                self.assertEqual([(r["email"], r["account_id"]) for r in manager.storage.emails()], [("one@icloud.com", "account-1")])
 
 
 if __name__ == "__main__":

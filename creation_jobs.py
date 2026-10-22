@@ -2,11 +2,14 @@
 import copy
 import secrets
 import threading
+from storage import Storage
 
 
 class CreationJobs:
     def __init__(self, manager, on_result=None):
         self.manager = manager
+        candidate = getattr(manager, "storage", None)
+        self.storage = candidate if isinstance(candidate, Storage) else None
         self._lock = threading.RLock()
         self._jobs = {}
         self._active = None
@@ -21,6 +24,11 @@ class CreationJobs:
     def get(self, job_id):
         with self._lock:
             job = self._jobs.get(job_id)
+            if job is None and self.storage:
+                job = self.storage.read_document("creation_job", job_id)
+                if job and job.get("status") == "running":
+                    job.update(status="interrupted", error="服务重启，未自动重试该任务")
+                    self.storage.write_document("creation_job", job, job_id)
             return copy.deepcopy(job) if job else None
 
     def start(self, account_ids, count=1, label="", interval=3, repair=None, item_interval=0):
@@ -30,10 +38,15 @@ class CreationJobs:
             job_id = secrets.token_hex(12)
             self._jobs[job_id] = {"id": job_id, "status": "running", "results": {}, "lines": [],
                                   "total_created": 0, "total_errors": 0, "progress": "准备账号配置"}
+            self._persist(job_id)
             self._active = job_id
             self._cancel_events[job_id] = threading.Event()
             threading.Thread(target=self._run, args=(job_id, account_ids, count, label, interval, repair, item_interval), daemon=True).start()
             return job_id
+
+    def _persist(self, job_id):
+        if self.storage:
+            self.storage.write_document("creation_job", self._jobs[job_id], job_id)
 
     def cancel(self, job_id):
         with self._lock:
@@ -41,6 +54,7 @@ class CreationJobs:
             if event and self._jobs[job_id]["status"] == "running":
                 event.set()
                 self._jobs[job_id]["progress"] = "正在停止，等待当前邮箱完成"
+                self._persist(job_id)
                 return True
             return False
 
@@ -53,6 +67,7 @@ class CreationJobs:
                 job["total_created"] += 1
             else:
                 job["total_errors"] += 1
+            self._persist(job_id)
         if self.on_result:
             self.on_result(result)
 
@@ -66,6 +81,7 @@ class CreationJobs:
                     if cancel.is_set(): break
                     with self._lock:
                         self._jobs[job_id]["progress"] = f"账号 {index + 1}/{len(account_ids)}，邮箱 {ordinal + 1}/{len(targets)}：创建并配置收件"
+                        self._persist(job_id)
                     try:
                         if repair is not None:
                             result = self.manager.setup_alias_inbox(account_id, target)
@@ -91,5 +107,6 @@ class CreationJobs:
                 self._jobs[job_id].update(status="failed", error=str(error)[:250], ok=False)
         finally:
             with self._lock:
+                self._persist(job_id)
                 self._active = None
                 self._cancel_events.pop(job_id, None)

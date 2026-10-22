@@ -20,9 +20,7 @@ iCloud HME — 多账号管理器
 """
 
 import json
-import os
-import tempfile
-import re
+import copy
 import time
 import uuid
 import threading
@@ -37,6 +35,7 @@ RESULTS_DIR = HERE / "results"
 LATEST_EMAILS = RESULTS_DIR / "latest_emails.txt"
 
 from mail_cache import get_cache  # noqa: E402
+from storage import Storage, database_for
 
 
 class AccountManager:
@@ -50,88 +49,16 @@ class AccountManager:
         self._load()
 
     def _load(self):
-        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-        if OLD_COOKIES_FILE.exists() and not ACCOUNTS_FILE.exists():
-            try:
-                self._migrate_old_cookies()
-            except Exception:
-                pass
-
-        if ACCOUNTS_FILE.exists():
-            try:
-                data = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
-                self.accounts = data.get("accounts", {})
-                for acc_id, account in self.accounts.items():
-                    session_path = self._session_path(acc_id)
-                    if session_path.exists():
-                        try:
-                            account["cookies"] = json.loads(session_path.read_text(encoding="utf-8"))["cookies"]
-                        except (ValueError, KeyError, OSError):
-                            account.update(cookies={}, status="error", _session_unreadable=True,
-                                           last_error="本账号会话文件无法读取，请重新导入；其他账号不受影响")
-                    elif not account.get("cookies"):
-                        account.update(cookies={}, status="error", last_error="本账号缺少登录会话，请重新导入")
-                self._save()  # Migrate legacy inline cookies into account-scoped files.
-            except (json.JSONDecodeError, OSError):
-                self.accounts = {}
+        self.storage = Storage(database_for(ACCOUNTS_FILE))
+        self.storage.import_accounts(ACCOUNTS_FILE, RESULTS_DIR / "account_sessions", OLD_COOKIES_FILE)
+        self.storage.import_emails(LATEST_EMAILS)
+        self.accounts = self.storage.load_accounts()
+        self._persisted_accounts = copy.deepcopy(self.accounts)
 
     def _save(self):
         with self._lock:
-            safe_accounts = {}
-            for acc_id, account in self.accounts.items():
-                if not account.get("_session_unreadable"):
-                    session_path = self._session_path(acc_id)
-                    session_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                    session_path.parent.chmod(0o700)
-                    self._write_private(session_path, {"cookies": account.get("cookies", {})})
-                safe_accounts[acc_id] = {k: v for k, v in account.items() if k != "cookies"}
-            self._write_private(ACCOUNTS_FILE, {"accounts": safe_accounts,
-                                               "updated_at": datetime.now().isoformat()})
-
-    @staticmethod
-    def _session_path(acc_id):
-        if not re.fullmatch(r"[a-zA-Z0-9_-]+", acc_id):
-            raise ValueError("账号 ID 无效")
-        return RESULTS_DIR / "account_sessions" / (acc_id + ".json")
-
-    @staticmethod
-    def _write_private(path, data):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(dir=path.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(data, stream, ensure_ascii=False, indent=2)
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary): os.unlink(temporary)
-
-    def _migrate_old_cookies(self):
-        try:
-            old = json.loads(OLD_COOKIES_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return
-        if not isinstance(old, dict) or not old:
-            return
-
-        acc_id = self._generate_id()
-        self.accounts[acc_id] = {
-            "id": acc_id,
-            "name": "默认账号",
-            "real_email": "",
-            "cookies": old,
-            "host": "icloud.com",
-            "status": "active",
-            "alias_total": 0,
-            "alias_active": 0,
-            "last_validated": None,
-            "last_error": None,
-            "created_at": datetime.now().isoformat(),
-        }
-        self._save()
-        try:
-            OLD_COOKIES_FILE.rename(OLD_COOKIES_FILE.with_suffix(".json.bak"))
-        except OSError:
-            pass
+            self.storage.save_accounts(self.accounts, self._persisted_accounts)
+            self._persisted_accounts = copy.deepcopy(self.accounts)
 
     def _generate_id(self) -> str:
         return "acc_" + uuid.uuid4().hex[:8]
@@ -520,9 +447,7 @@ class AccountManager:
                         raise RuntimeError("iCloud 未返回有效邮箱")
                     # Persist the alias before any subsequent network operation.
                     with self._lock:
-                        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-                        with open(str(LATEST_EMAILS), "a", encoding="utf-8") as f:
-                            f.write(f"{email}\t{acc_id}\n")
+                        self.storage.add_email(email, acc_id)
                         account["alias_total"] = account.get("alias_total", 0) + 1
                         account["alias_active"] = account.get("alias_active", 0) + 1
                         self._save()

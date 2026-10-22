@@ -9,13 +9,19 @@ import requests
 
 from inbox_links import REGISTRY, update_link
 
+from storage import Storage, database_for
+
 CONFIG = Path(__file__).resolve().parent / "results" / "cloud_inbox_config.json"
 PUBLIC_ORIGIN = "https://webmail.fastaiapi.cloud"
 
 
 def load_config(path=CONFIG):
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        store = Storage(database_for(path))
+        store.import_document("public_config", path)
+        data = store.read_document("public_config")
+        if data is None:
+            raise FileNotFoundError(path)
     except FileNotFoundError:
         raise RuntimeError("专属收件服务尚未部署，请先配置 Cloudflare 收件服务") from None
     if data.get("base_url") != PUBLIC_ORIGIN or len(data.get("admin_token", "")) < 32:

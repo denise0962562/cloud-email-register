@@ -1,23 +1,23 @@
 """Local registry of per-alias inbox links. Credentials stay in ignored results/."""
-import json
-import os
-import tempfile
 import threading
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+from storage import Storage, database_for
 
 REGISTRY = Path(__file__).resolve().parent / "results" / "inbox_links.json"
 _lock = threading.RLock()
 
 
+def link_storage(path=REGISTRY):
+    store = Storage(database_for(path))
+    store.import_links(path)
+    return store
+
+
 def load_links(path=REGISTRY):
-    with _lock:
-        try:
-            return json.loads(Path(path).read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {}
+    return link_storage(path).load_links()
 
 
 def save_link(alias, destination, url, *, verified=False, path=REGISTRY):
@@ -37,22 +37,7 @@ def save_link(alias, destination, url, *, verified=False, path=REGISTRY):
 
 
 def update_link(alias, values, path=REGISTRY):
-    with _lock:
-        links = load_links(path)
-        record = links.setdefault(alias.lower(), {"email": alias.lower()})
-        record.update(values)
-        record["updated_at"] = datetime.now(timezone.utc).isoformat()
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(dir=path.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(links, stream, ensure_ascii=False, indent=2)
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-        return dict(record)
+    return link_storage(path).update_link(alias, values)
 
 
 def is_ready(record):
