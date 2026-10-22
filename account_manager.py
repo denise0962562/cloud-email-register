@@ -497,7 +497,9 @@ class AccountManager:
     def get_aliases_for_account(self, acc_id: str) -> List[Dict]:
         try:
             client = self.get_client(acc_id, verbose=False)
-            return client.list_aliases()
+            aliases = client.list_aliases()
+            self.storage.backfill_creation_times(acc_id, aliases)
+            return aliases
         except Exception:
             return []
 

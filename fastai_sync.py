@@ -1,0 +1,268 @@
+"""Asynchronous, idempotent iCloud-pool imports into gpt-auto-register."""
+import copy
+import json
+import secrets
+import threading
+import time
+from urllib.parse import urlsplit, urlunsplit
+import requests
+from inbox_links import is_ready
+
+DEFAULTS = {'api_url': 'http://127.0.0.1:8766/api/import', 'enabled': False, 'interval_minutes': 60, 'batch_size': 50, 'include_synced': False}
+
+
+class ImportErrorDetail(RuntimeError):
+    def __init__(self, message, stop=False):
+        super().__init__(message)
+        self.stop = stop
+
+
+def normalize_api_url(value):
+    if not isinstance(value, str) or len(value) > 2000:
+        raise ValueError('请填写有效的 FastAI 接口地址')
+    try:
+        u = urlsplit(value.strip())
+        if u.scheme not in ('http','https') or not u.hostname or u.username or u.password or u.query or u.fragment:
+            raise ValueError()
+        _ = u.port
+    except ValueError:
+        raise ValueError('接口须为 http(s) 地址，不能包含用户名、密码、查询参数或片段') from None
+    path = u.path.rstrip('/') or '/api/import'
+    return urlunsplit((u.scheme.lower(),u.netloc,path,'',''))
+
+
+class FastAISync:
+    def __init__(self, storage, http_factory=requests.Session, clock=time.time):
+        self.storage, self.http_factory, self.clock = storage, http_factory, clock
+        self.lock = threading.RLock()
+        self.wake, self.stop_event = threading.Event(), threading.Event()
+        self.thread = None
+        self.work_thread = None
+        state = storage.read_document('fastai_sync_state') or {}
+        self.config = {**DEFAULTS, **state.get('config', {})}
+        self.next_run = state.get('next_run')
+        self.active = state.get('active')
+        self.latest = state.get('latest')
+        self.logs = state.get('logs', [])
+        if self.active:
+            job = storage.read_document('fastai_sync_job', self.active)
+            if job and job['status'] == 'running':
+                with storage.connect() as db:
+                    confirmed = {email for email, in db.execute(
+                        "SELECT email FROM fastai_sync WHERE job_id=? AND status='synced'", (self.active,))}
+                for item in job['items']:
+                    if item['status'] == 'running':
+                        if item['email'] in confirmed:
+                            item.update(status='synced',action='已确认',error='')
+                        else:
+                            item.update(status='failed',error='服务重启，请重试未同步邮箱')
+                job['succeeded'] = sum(item['status']=='synced' for item in job['items'])
+                job['failed'] = sum(item['status']=='failed' for item in job['items'])
+                job['processed'] = job['succeeded'] + job['failed']
+                job.update(status='interrupted',finished_at=clock(),message='服务重启，已成功记录保留，未完成的邮箱可重新同步')
+                self._save_job(job)
+                with storage.connect() as db:
+                    db.execute("UPDATE fastai_sync SET status='failed',last_error=? WHERE job_id=? AND status='running'",
+                               ('服务重启，请重试未同步邮箱',self.active))
+            self.active = None
+            if self.config['enabled']: self.next_run = clock() + self.config['interval_minutes'] * 60
+        if self.config['enabled'] and self.next_run is None:
+            self.next_run = clock() + self.config['interval_minutes'] * 60
+        self._persist_state()
+
+    def _persist_state(self):
+        self.storage.write_document('fastai_sync_state', {'config':self.config,'next_run':self.next_run,
+                                    'active':self.active,'latest':self.latest,'logs':self.logs})
+
+    def _log(self, level, message):
+        self.logs.append({'time':self.clock(),'level':level,'message':message})
+        self.logs = self.logs[-300:]
+
+    def _save_job(self, job):
+        self.storage.write_document('fastai_sync_job',job,job['id'])
+
+    def records(self, api_url=None):
+        with self.storage.connect() as db:
+            return {email: {'inbox_url':url,'status':status,'synced_at':stamp,'error':error}
+                    for email,url,status,stamp,error in db.execute(
+                        'SELECT email,inbox_url,status,synced_at,last_error FROM fastai_sync WHERE api_url=?',
+                        (api_url or self.config['api_url'],))}
+
+    def pending(self, api_url=None, include_synced=False):
+        links, states, rows = self.storage.load_links(), self.records(api_url), []
+        seen = set()
+        for source in self.storage.emails():
+            email = source['email'].lower()
+            if email in seen: continue
+            seen.add(email)
+            link, record = links.get(email,{}), states.get(email,{})
+            if not is_ready(link): continue
+            url = link['inbox_url']
+            if not include_synced and record.get('status') == 'synced' and record.get('inbox_url') == url: continue
+            rows.append({'email':email,'inbox_url':url})
+        return rows
+
+    def snapshot(self):
+        with self.lock:
+            job = self.storage.read_document('fastai_sync_job',self.active or self.latest) if (self.active or self.latest) else None
+            with self.storage.connect() as db:
+                history = [json.loads(row[0]) for row in db.execute(
+                    "SELECT data FROM documents WHERE kind='fastai_sync_job' ORDER BY json_extract(data,'$.started_at') DESC,rowid DESC LIMIT 40")]
+            history = [{k:v for k,v in entry.items() if k != 'items'} for entry in history]
+            return {'history':history,'logs':copy.deepcopy(self.logs),'current':job if self.active else None,'config':copy.deepcopy(self.config),'next_run':self.next_run,
+                    'server_time':self.clock(),'pending':len(self.pending()),
+                    'eligible':len(self.pending(include_synced=self.config['include_synced'])),'job':job}
+
+    def configure(self, data):
+        with self.lock:
+            if not isinstance(data,dict) or set(data) - set(DEFAULTS): raise ValueError('同步配置字段无效')
+            config = {**self.config, **data}
+            config['api_url'] = normalize_api_url(config['api_url'])
+            if type(config['enabled']) is not bool: raise ValueError('自动同步开关必须为布尔值')
+            if type(config['interval_minutes']) is not int or not 1 <= config['interval_minutes'] <= 10080:
+                raise ValueError('同步间隔应为 1–10080 分钟的整数')
+            if type(config['batch_size']) is not int or not 1 <= config['batch_size'] <= 10000:
+                raise ValueError('每轮同步数量应为 1–10000 的整数')
+            if type(config['include_synced']) is not bool: raise ValueError('包含已同步开关必须为布尔值')
+            self.config = config
+            self._log('info','配置已保存：自动同步%s，每 %d 分钟，每轮最多 %d 个' % ('开启' if config['enabled'] else '关闭',config['interval_minutes'],config['batch_size']))
+            if not config['enabled']: self.next_run = None
+            elif self.next_run is None: self.next_run = self.clock() + config['interval_minutes'] * 60
+            self._persist_state()
+            self.wake.set()
+            return self.snapshot()
+
+    def get_job(self, key):
+        with self.lock:
+            return self.storage.read_document('fastai_sync_job',key)
+
+    def start(self, scheduled=False, emails=None, all_pending=False):
+        with self.lock:
+            if emails is not None and (not isinstance(emails,list) or not emails or any(not isinstance(e,str) for e in emails)):
+                raise ValueError('邮箱列表必须是非空字符串列表')
+            if type(all_pending) is not bool: raise ValueError('同步全部参数必须为布尔值')
+            if self.active: return self.get_job(self.active)
+            endpoint = self.config['api_url']
+            pending = self.pending(endpoint,include_synced=self.config['include_synced'] and not all_pending)
+            if emails is not None:
+                selected={e.lower() for e in emails}
+                pending=[row for row in pending if row['email'] in selected]
+            if not all_pending: pending = pending[:self.config['batch_size']]
+            job = {'id':secrets.token_hex(12),'status':'running' if pending else 'completed',
+                   'api_url':endpoint,'include_synced':self.config['include_synced'] and not all_pending,'trigger':'scheduled' if scheduled else 'manual',
+                   'started_at':self.clock(),'finished_at':None if pending else self.clock(),
+                   'total':len(pending),'processed':0,'succeeded':0,'failed':0,
+                   'message':'正在同步' if pending else '没有可同步的未同步邮箱',
+                   'items':[{'email':r['email'],'status':'pending','error':''} for r in pending]}
+            self._log('info',('自动' if scheduled else '手动')+'任务启动，计划同步 %d 个邮箱' % len(pending))
+            self.latest = job['id']
+            self.active = job['id'] if pending else None
+            if scheduled: self.next_run = None
+            if not pending and self.config['enabled'] and scheduled:
+                self.next_run = self.clock() + self.config['interval_minutes'] * 60
+            self._save_job(job)
+            self._persist_state()
+            response = copy.deepcopy(job)
+            if pending:
+                self.work_thread = threading.Thread(target=self._run,args=(job,pending),daemon=True)
+                self.work_thread.start()
+            return response
+
+    def _set_status(self, row, job, status, error=''):
+        with self.storage.connect() as db:
+            # A failed resend must retain the previous confirmation for this exact destination/link.
+            if status != 'synced' and db.execute(
+                "SELECT 1 FROM fastai_sync WHERE email=? AND api_url=? AND inbox_url=? AND status='synced'",
+                (row['email'],job['api_url'],row['inbox_url'])).fetchone():
+                return
+            db.execute('''INSERT INTO fastai_sync VALUES (?,?,?,?,?,?,?) ON CONFLICT(email,api_url)
+                DO UPDATE SET inbox_url=excluded.inbox_url,status=excluded.status,synced_at=excluded.synced_at,
+                last_error=excluded.last_error,job_id=excluded.job_id''',
+                (row['email'],job['api_url'],row['inbox_url'],status,
+                 self.clock() if status=='synced' else None,error,job['id']))
+
+    @staticmethod
+    def _import(http, endpoint, row):
+        try:
+            response = http.post(endpoint,json={'kind':'icloud_relay','text':row['email']+'----'+row['inbox_url']},timeout=(5,20))
+        except requests.RequestException:
+            raise ImportErrorDetail('无法确认导入结果：连接失败或超时，重试会由目标接口去重',stop=True) from None
+        if response.status_code != 200:
+            stop = response.status_code in (401,403,404,429) or response.status_code >= 500
+            raise ImportErrorDetail('导入接口返回 HTTP '+str(response.status_code),stop=stop)
+        try: data = response.json()
+        except ValueError: raise ImportErrorDetail('导入接口未返回有效 JSON',stop=True) from None
+        if not isinstance(data,dict): raise ImportErrorDetail('导入接口响应格式无效',stop=True)
+        counts = [data.get(k) for k in ('inserted','updated','skipped')]
+        if data.get('ok') is not True or data.get('parsed') != 1 or any(type(v) is not int or v<0 for v in counts) or sum(counts) != 1:
+            raise ImportErrorDetail('导入接口未确认本条邮箱导入成功')
+        return '新增' if counts[0] else '更新' if counts[1] else '已存在'
+
+    def _run(self, job, rows):
+        http = self.http_factory()
+        http.trust_env = False
+        try:
+            for row,item in zip(rows,job['items']):
+                with self.lock:
+                    item['status']='running'
+                    self._set_status(row,job,'running')
+                    job['message']='正在同步 '+row['email']
+                    self._save_job(job)
+                stop = False
+                try:
+                    action = self._import(http,job['api_url'],row)
+                    with self.lock:
+                        self._set_status(row,job,'synced')
+                        item.update(status='synced',action=action)
+                        job['succeeded']+=1
+                except ImportErrorDetail as error:
+                    with self.lock:
+                        self._set_status(row,job,'failed',str(error))
+                        item.update(status='failed',error=str(error))
+                        job['failed']+=1
+                    stop = error.stop
+                with self.lock:
+                    job['processed']+=1
+                    self._log('info' if item['status']=='synced' else 'error',row['email']+'：'+(item.get('action','同步成功') if item['status']=='synced' else item['error']))
+                    self._save_job(job)
+                    self._persist_state()
+                if stop: break
+            job['status']='completed' if job['processed']==job['total'] else 'failed'
+            job['message']='同步结束：成功 %d，失败 %d，未尝试 %d' % (job['succeeded'],job['failed'],job['total']-job['processed'])
+        except Exception:
+            job.update(status='failed',message='同步任务异常中止；已成功记录保留，可重试未同步邮箱')
+        finally:
+            http.close()
+            with self.lock:
+                self._log('info' if job['status']=='completed' and not job['failed'] else 'error',job['message'])
+                job['finished_at']=self.clock()
+                self._save_job(job)
+                self.active=None
+                if self.config['enabled'] and (job['trigger']=='scheduled' or job['succeeded']>0 or self.next_run is None):
+                    self.next_run=self.clock()+self.config['interval_minutes']*60
+                self._persist_state()
+                self.wake.set()
+
+    def tick(self):
+        with self.lock:
+            if self.config['enabled'] and self.next_run is not None and self.clock()>=self.next_run and not self.active:
+                self.start(scheduled=True)
+
+    def start_scheduler(self):
+        if self.thread and self.thread.is_alive(): return
+        self.stop_event.clear()
+        def loop():
+            while not self.stop_event.is_set():
+                self.wake.clear()
+                try: self.tick()
+                except Exception:
+                    with self.lock:
+                        self.next_run=self.clock()+self.config['interval_minutes']*60
+                        self._persist_state()
+                self.wake.wait(1)
+        self.thread=threading.Thread(target=loop,daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.stop_event.set()
+        self.wake.set()

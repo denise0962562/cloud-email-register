@@ -9,6 +9,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / 'icloud_hme.sqlite3'
@@ -49,6 +50,10 @@ class Storage:
                 CREATE TABLE IF NOT EXISTS task_logs(id INTEGER PRIMARY KEY AUTOINCREMENT, digest TEXT UNIQUE NOT NULL,
                     data TEXT NOT NULL CHECK(json_valid(data)));
                 CREATE TABLE IF NOT EXISTS legacy_sources(path TEXT PRIMARY KEY, sha256 TEXT NOT NULL, content BLOB NOT NULL);
+                CREATE TABLE IF NOT EXISTS fastai_sync(email TEXT NOT NULL, api_url TEXT NOT NULL,
+                    inbox_url TEXT NOT NULL, status TEXT NOT NULL, synced_at REAL,
+                    last_error TEXT NOT NULL DEFAULT '', job_id TEXT NOT NULL,
+                    PRIMARY KEY(email,api_url));
                 PRAGMA user_version=1;
             ''')
 
@@ -166,6 +171,30 @@ class Storage:
         with self.connect() as db:
             db.execute('INSERT INTO email_records(email,account_id,created_at) VALUES (?,?,?)',
                        (email, account_id, datetime.now(timezone.utc).isoformat()))
+
+    def backfill_creation_times(self, account_id, aliases):
+        """Fill missing timestamps from Apple without changing existing times or ownership."""
+        changed = 0
+        with self.connect() as db:
+            for alias in aliases:
+                value = alias.get('createdAt')
+                if value is None or isinstance(value, bool): continue
+                try:
+                    if isinstance(value,(int,float)) or str(value).replace('.','',1).isdigit():
+                        stamp = float(value)
+                        if stamp <= 0: continue
+                        if stamp > 100000000000: stamp /= 1000
+                        date = datetime.fromtimestamp(stamp,timezone.utc)
+                    else:
+                        date = datetime.fromisoformat(str(value).replace('Z','+00:00'))
+                        if date.tzinfo is None: date = date.replace(tzinfo=ZoneInfo('Asia/Shanghai'))
+                    text = date.astimezone(timezone.utc).isoformat()
+                except (ValueError, TypeError, OverflowError, OSError):
+                    continue
+                cursor = db.execute("UPDATE email_records SET created_at=? WHERE email=? AND account_id=? AND created_at=''",
+                                    (text,alias.get('email','').lower(),account_id))
+                changed += cursor.rowcount
+        return changed
 
     def emails(self):
         with self.connect() as db:

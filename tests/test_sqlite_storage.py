@@ -67,6 +67,20 @@ class SQLiteStorageTest(unittest.TestCase):
             record=store.load_links()['one@icloud.com']
             for n in range(24):self.assertEqual(record[str(n)],n)
 
+    def test_apple_creation_time_backfill_preserves_existing_values_and_account_ownership(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);self.fixture(root);migrate(root)
+            store=Storage(root/'icloud_hme.sqlite3')
+            aliases=[{'email':'first@icloud.com','createdAt':1792594892000},
+                     {'email':'second@icloud.com','createdAt':1792594892000}]
+            self.assertEqual(store.backfill_creation_times('a',aliases),2)
+            rows=store.emails()
+            self.assertEqual(rows[0]['created_at'],'2026-10-21T15:01:32+00:00')
+            self.assertEqual(rows[2]['created_at'],'')
+            self.assertEqual(store.backfill_creation_times('a',[{'email':'first@icloud.com','createdAt':1792600000000}]),0)
+            self.assertEqual(store.emails()[0]['created_at'],rows[0]['created_at'])
+            self.assertEqual(store.backfill_creation_times('b',[{'email':'second@icloud.com','createdAt':'invalid'}]),0)
+
     def test_creation_result_survives_restart(self):
         with tempfile.TemporaryDirectory() as folder:
             store=Storage(Path(folder)/'db.sqlite3')
