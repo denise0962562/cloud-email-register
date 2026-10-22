@@ -1,0 +1,2 @@
+# Keep Windows command scripts in their native line endings.
+*.cmd text eol=crlf

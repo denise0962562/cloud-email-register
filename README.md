@@ -27,6 +27,20 @@ python web_ui.py
 #    支持粘贴 Cookie Editor 的 Header String 或 JSON
 ```
 
+### Windows 启动与重启
+
+`start.sh` 是 macOS/Linux 的 shell 脚本，Windows 的 CMD/PowerShell 请使用 `start.cmd` / `restart.cmd`。仓库没有名为 `restart.sh` 的脚本。首次在 Windows 部署时，在项目目录执行：
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\start.cmd
+# 重启本项目服务
+.\restart.cmd
+```
+
+默认监听 `http://127.0.0.1:5050`，参数可附在脚本后，例如 `.\start.cmd --port 8080`。窗口保持打开，关闭窗口会停止服务。重启脚本只停止本项目 Windows 虚拟环境中以绝对路径启动的 `web_ui.py`，不会按端口或 Python 进程名批量结束其他项目；旧的手动相对路径启动进程请先在其窗口按 Ctrl+C。重启时正在执行的任务可能中断，已确认成功记录及配置保留在 SQLite，自动任务按已保存设置恢复。macOS 的 `.venv` 不能复制到 Windows 使用，需重新创建 Windows 虚拟环境。
+
 ## 使用方式
 
 ### Web UI（推荐）
