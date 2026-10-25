@@ -113,9 +113,9 @@ python icloud_hme.py delete --email xxx@icloud.com --cookies cookies.json
 
 ## 自动分裂、定时任务与地址类型
 
-侧栏的「自动分裂」（`/auto-plus`）复用自动注册的配置、倒计时、任务历史、日志、结果弹窗和下载状态。选择 1–20 个已配置收件的**源地址**，设置每源每轮数量、后缀前缀、地址间隔和固定或随机调度间隔。初次安装默认关闭，默认每 60 分钟、每源地址 10 个；开启后先等待一个配置间隔，也可以立即执行一轮。
+侧栏的「自动分裂」（`/auto-plus`）复用自动注册的配置、倒计时、任务历史、日志、结果弹窗和下载状态。选择 1–20 个已配置收件的**源地址**，设置每源每轮数量、任务标签、地址间隔和固定或随机调度间隔。初次安装默认关闭，默认每 60 分钟、每源地址 10 个；开启后先等待一个配置间隔，也可以立即执行一轮。
 
-每轮按源地址串行生成随机后缀，配置收件链接并写入同一「邮箱列表」。同源地址间使用现有工作流锁，暂停后完成当前地址即停止；配置失败的地址会保留到列表，后续轮次优先续配，不重复写入。自动分裂复用源地址的收件通道，无需新建 Apple 隐藏地址或转发规则，不增加 Apple 云端别名计数，也不会自动发送测试邮件。链接配置成功显示「收件已配置 · 待实测」，只有实际投递验证成功才显示「已实收」。
+每轮按源地址串行生成随机 4 位小写字母或数字后缀（例如 `potted_smogs05+a7k2@icloud.com`），不拼接任务标签或额外连字符；遇到已有地址会重新随机，最多尝试 64 次，无法得到新地址则停止该源地址本轮，不覆盖旧记录。生成结果校验 `@` 前部分不超过 64 字节，源地址不得以点开头、结尾或包含连续点。已有地址及失败续配地址保持原值。随后配置收件链接并写入同一「邮箱列表」。同源地址间使用现有工作流锁，暂停后完成当前地址即停止；配置失败的地址会保留到列表，后续轮次优先续配，不重复写入。自动分裂复用源地址的收件通道，无需新建 Apple 隐藏地址或转发规则，不增加 Apple 云端别名计数，也不会自动发送测试邮件。链接配置成功显示「收件已配置 · 待实测」，只有实际投递验证成功才显示「已实收」。
 
 邮箱列表统一使用两种类型：**源地址**和**分裂地址**。分裂地址显示所属源地址，支持类型筛选；复制、CSV 和 TXT 导出与当前类型筛选一致。分裂地址的独立链接仍然与源地址共用全部底层邮件，不提供同源地址之间的收件隔离。导出的链接可以继续用于现有中转邮箱导入器。
 
@@ -124,7 +124,7 @@ python icloud_hme.py delete --email xxx@icloud.com --cookies cookies.json
 接口：
 
 - `GET /api/auto-plus/sources`：列出可分裂的源地址。
-- `GET/POST /api/auto-plus`：查看或保存配置，字段为 `enabled`、`base_emails`、`count`、`interval_mode`、`interval_minutes`、`min_minutes`、`max_minutes`、`item_interval_seconds`、`label`（ASCII 后缀前缀，1–10 位）。
+- `GET/POST /api/auto-plus`：查看或保存配置，字段为 `enabled`、`base_emails`、`count`、`interval_mode`、`interval_minutes`、`min_minutes`、`max_minutes`、`item_interval_seconds`、`label`（ASCII 任务标签，1–10 位，不拼入邮箱地址）。
 - `POST /api/auto-plus/run`：按当前或提交的配置异步执行一轮，返回 `job_id`。
 - `GET /api/auto-plus/tasks/{job_id}`、`GET /api/auto-plus/tasks/{job_id}/export`：查看或导出该轮已配置成功的结果。
 - `GET /api/emails`：每条增加 `address_type`（`source` / `split`）、`address_type_label`、`source_email`、`shared_inbox` 和独立的 `inbox_verified` 状态。

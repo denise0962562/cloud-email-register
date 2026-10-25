@@ -1,6 +1,7 @@
 """自动分裂复用现有创建队列和定时器，独立保存配置及任务记录。"""
 import re
 import secrets
+import string
 
 from auto_registration import AutoRegistration, DEFAULTS
 from creation_jobs import CreationJobs
@@ -30,7 +31,7 @@ class PlusCreationJobs(CreationJobs):
         if type(item_interval) is not int or not 0 <= item_interval <= 300:
             raise ValueError("地址间隔必须为 0–300 秒的整数")
         for base in bases:
-            plus_address(base, label + "-" + "0" * 12)
+            plus_address(base, "a0b1")
         return super().start(bases, count, label.lower(), interval=0, item_interval=item_interval)
 
     def create_item(self, base, label):
@@ -45,11 +46,18 @@ class PlusCreationJobs(CreationJobs):
                 pending = next((email for email, row in links.items()
                                 if row.get("kind") == "plus" and row.get("base_email") == base
                                 and row.get("auto_prefix") == label and not is_ready(row)), None)
-                target = pending or plus_address(base, label + "-" + secrets.token_hex(6))
+                target = pending
                 if not pending:
-                    # 随机碰撞时直接停止本源地址本轮，不覆盖已有配置。
-                    if target in links:
-                        raise ValueError("分裂地址发生碰撞，请重试")
+                    # Four-character suffixes have a smaller namespace. Retry
+                    # collisions without touching an existing address or link.
+                    for _ in range(64):
+                        tag = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(4))
+                        candidate = plus_address(base, tag)
+                        if candidate not in links:
+                            target = candidate
+                            break
+                    else:
+                        raise ValueError("无法生成未使用的四位后缀，请稍后重试或更换源地址")
                     update_link(target, {"email": target, "kind": "plus", "base_email": base,
                                 "account_id": source["account_id"], "auto_prefix": label,
                                 "destination": source["destination"],

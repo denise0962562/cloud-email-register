@@ -10,7 +10,7 @@
 <label>每轮间隔方式<select id="mode"><option value="fixed">固定间隔</option><option value="random">随机范围</option></select></label>
 <div id="randomFields" class="field-row"><label>最短间隔（分钟）<input id="minMinutes" type="number" min="1" max="10080" required value="60"></label><label>最长间隔（分钟）<input id="maxMinutes" type="number" min="1" max="10080" required value="90"></label></div>
 <label id="fixedFields" hidden>间隔（分钟）<input id="fixedMinutes" type="number" min="1" max="10080" required value="60"></label>
-<label>分裂后缀前缀<input id="label" maxlength="10" pattern="[A-Za-z0-9_-]{1,10}" value="auto"></label>
+<label>任务标签<input id="label" maxlength="10" pattern="[A-Za-z0-9_-]{1,10}" value="auto"><small>仅用于任务归类，不拼入邮箱。新地址使用 + 后随机 4 位小写字母或数字，例如 potted_smogs05+a7k2@icloud.com。</small></label>
 <p class="hint">每轮结束后计算下一次执行时间。保存配置立即生效，不改变已排定的下次时间。首次开启会先等待配置间隔；需要立即开始时点击「立即执行一轮」。立即执行至少成功 1 个邮箱才重置倒计时；全部失败保留原定下轮时间。配置失败结束本源地址本轮，未完成地址会在下轮优先续配。每个地址有独立链接，但同源链接共用全部邮件；收件已配置与已实收分开记录。</p>
 <div class="actions"><button id="save" type="submit" class="primary">保存配置</button><button id="run" type="button">立即执行一轮</button></div><p id="formMessage" role="status" class="message"></p></form>
 </section><section class="panel logs-panel"><div class="panel-title"><h2>分裂日志</h2><span class="live"><i></i> 后台同步</span></div><div id="logs" class="logs" role="log" aria-label="分裂日志"><div class="log-empty">尚无日志。保存配置后开启自动分裂，或立即执行一轮。</div></div><div class="log-foot">最近 300 条 · 最新在上 · 刷新页面后保留 · 每 2 秒同步</div></section></div>

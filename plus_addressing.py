@@ -21,6 +21,8 @@ def plus_address(base, tag):
     if not isinstance(tag, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,24}", tag):
         raise ValueError("后缀须为 1–24 位英文字母、数字、下划线或短横线")
     local, domain = base.lower().split("@")
+    if local.startswith('.') or local.endswith('.') or '..' in local:
+        raise ValueError("源地址的本地部分不能以点开头、结尾或包含连续的点")
     if len(local) + len(tag) + 1 > 64:
         raise ValueError("分裂地址的 @ 前部分不能超过 64 字符")
     return f"{local}+{tag.lower()}@{domain}"

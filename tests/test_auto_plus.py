@@ -56,6 +56,36 @@ class AutoPlusTest(unittest.TestCase):
         self.assertEqual(len(self.store.emails()), 100)
         self.assertEqual(self.manager.accounts['owner']['alias_total'], 1)
         self.assertTrue(all(r['kind']=='plus' and not r.get('verified') for e,r in self.records.items() if '+' in e))
+        for email in self.records:
+            if '+' in email:self.assertRegex(email,r'^base\+[a-z0-9]{4}@icloud\.com$')
+
+    def test_short_suffix_collision_retries_without_overwriting_existing_link(self):
+        original={'configured':True,'inbox_url':'https://mail.example/existing','kind':'plus','base_email':'base@icloud.com'}
+        self.records['base+aaaa@icloud.com']=copy.deepcopy(original)
+        with patch('auto_plus.secrets.choice',side_effect=list('aaaab1c2')):
+            result=self.jobs.create_item('base@icloud.com','auto')
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['email'],'base+b1c2@icloud.com')
+        self.assertEqual(self.records['base+aaaa@icloud.com'],original)
+
+    def test_exhausted_collisions_leave_existing_records_untouched(self):
+        self.records['base+aaaa@icloud.com']={'configured':True,'inbox_url':'https://mail.example/existing'}
+        before=copy.deepcopy(self.records)
+        with patch('auto_plus.secrets.choice',return_value='a'):
+            result=self.jobs.create_item('base@icloud.com','auto')
+        self.assertFalse(result['ok'])
+        self.assertEqual(self.records,before)
+        self.assertEqual(self.store.emails(),[])
+
+    def test_four_character_suffix_fits_local_part_limit_and_rejects_invalid_dots(self):
+        from plus_addressing import plus_address
+        self.assertEqual(len(plus_address('a'*59+'@icloud.com','a1b2').split('@')[0]),64)
+        for local in ['a'*60,'.abc','abc.','a..b']:
+            with self.assertRaises(ValueError):plus_address(local+'@icloud.com','a1b2')
+        base='a'*59+'@icloud.com'
+        self.records[base]={**self.records['base@icloud.com'],'email':base}
+        result=self.wait(self.jobs.start([base],1,'long-label',item_interval=0))
+        self.assertEqual(result['total_created'],1)
 
     def test_failed_publication_is_visible_and_resumes_same_address(self):
         with patch('plus_addressing.publish_inbox_link', side_effect=RuntimeError('HTTP 503 private-token')):
