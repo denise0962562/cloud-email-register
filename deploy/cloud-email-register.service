@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=fastaiapi
-Group=fastaiapi
+User=ubuntu
+Group=ubuntu
 WorkingDirectory=/opt/fastaiapi-groups/cloud-email-register
 Environment=TZ=Asia/Shanghai
 Environment=PYTHONUNBUFFERED=1
