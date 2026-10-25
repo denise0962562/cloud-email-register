@@ -1,3 +1,41 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>管理员登录 · iCloud HME</title><link rel="stylesheet" href="/static/admin.css"></head><body><main class="login"><div class="eyebrow">ICLOUD HME / ADMIN</div><h1>管理员登录</h1><p class="muted">登录后管理邮箱、账号与后台任务。会话默认有效 30 天。</p><form id="login"><label for="username">管理员账号</label><input id="username" autocomplete="username" maxlength="64" required autofocus><label for="password">密码</label><input id="password" type="password" autocomplete="current-password" maxlength="256" required><button id="submit">登录管理后台</button><p id="error" class="error" role="alert"></p></form></main><script>
-document.querySelector('#login').addEventListener('submit',async event=>{event.preventDefault();const button=document.querySelector('#submit'),error=document.querySelector('#error');button.disabled=true;error.textContent='';try{const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.querySelector('#username').value,password:document.querySelector('#password').value})});const d=await r.json();if(!r.ok)throw new Error(d.error||'登录失败');location.assign('/');}catch(e){error.textContent=e.message;}finally{button.disabled=false;}});
-</script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#101d2b">
+  <title>管理员登录 · FastAiApi</title>
+  <link rel="stylesheet" href="/static/login.css">
+</head>
+<body class="login-page">
+  <main class="login-shell">
+    <section class="brand-panel" aria-label="FastAiApi">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M8 25V7h17l-3 5H13v4h8l-3 5h-5v4H8Z" fill="currentColor"/></svg></span><span>FastAiApi<span class="brand-dot">.</span></span></div>
+      <div class="brand-message"><span class="eyebrow">YOUR SPACE. CONNECTED.</span><h2>专注管理，<br><span>从容掌控。</span></h2><div class="message-rule"></div></div>
+      <div class="orbit-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit orbit-three"></div><div class="orbit-point point-one"></div><div class="orbit-point point-two"></div><div class="mail-tile"><svg viewBox="0 0 64 64" fill="none"><rect x="11" y="17" width="42" height="31" rx="6" stroke="currentColor" stroke-width="2"/><path d="m13 21 15.5 12a6 6 0 0 0 7 0L51 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div><div class="floating-tile tile-one">@</div><div class="floating-tile tile-two"><svg viewBox="0 0 24 24" fill="none"><path d="m7 12 3 3 7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div></div>
+      <div class="brand-footer"><span class="small-line"></span> MANAGEMENT PLATFORM <span class="edition">01 / FASTAIAPI</span></div>
+    </section>
+    <section class="form-panel" aria-labelledby="login-title">
+      <div class="mobile-brand">FastAiApi<span>.</span></div>
+      <div class="form-content">
+        <div class="form-heading"><span class="eyebrow">WELCOME BACK</span><h1 id="login-title">管理员登录</h1></div>
+        <form id="login">
+          <div class="field"><label for="username">管理员账号</label><div class="input-wrap"><svg class="input-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="8" r="3.3" stroke="currentColor" stroke-width="1.6"/><path d="M5 20v-2a7 7 0 0 1 14 0v2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><input id="username" name="username" placeholder="请输入管理员账号" autocomplete="username" maxlength="64" required></div></div>
+          <div class="field"><label for="password">密码</label><div class="input-wrap"><svg class="input-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="3" stroke="currentColor" stroke-width="1.6"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><input id="password" name="password" type="password" placeholder="请输入密码" autocomplete="current-password" maxlength="256" required><button class="password-toggle" id="toggle-password" type="button" aria-label="显示密码" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="2.5" stroke="currentColor" stroke-width="1.5"/></svg></button></div></div>
+          <p id="error" class="error" role="alert" aria-live="polite"></p>
+          <button class="submit" id="submit" type="submit"><span id="submit-label">登录管理后台</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </form>
+        <div class="form-divider"><span></span><i></i><span></span></div>
+        <div class="form-signature">FASTAIAPI <span>·</span> ADMIN CONSOLE</div>
+      </div>
+      <footer>© <span id="year">2026</span> FastAiApi</footer>
+    </section>
+  </main>
+  <script>
+    const form=document.querySelector('#login'),button=document.querySelector('#submit'),error=document.querySelector('#error'),password=document.querySelector('#password'),toggle=document.querySelector('#toggle-password');
+    document.querySelector('#year').textContent=new Date().getFullYear();
+    toggle.addEventListener('click',()=>{const visible=password.type==='password';password.type=visible?'text':'password';toggle.setAttribute('aria-label',visible?'隐藏密码':'显示密码');toggle.setAttribute('aria-pressed',String(visible));});
+    form.addEventListener('submit',async event=>{event.preventDefault();button.disabled=true;document.querySelector('#submit-label').textContent='正在登录…';error.textContent='';try{const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.querySelector('#username').value,password:password.value})});const d=await r.json();if(!r.ok)throw new Error(d.error||'登录失败');location.assign('/');}catch(e){error.textContent=e.message;}finally{button.disabled=false;document.querySelector('#submit-label').textContent='登录管理后台';}});
+  </script>
+</body>
+</html>
