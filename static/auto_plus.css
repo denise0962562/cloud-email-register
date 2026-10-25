@@ -1,0 +1,1 @@
+#accounts{max-height:250px;overflow:auto;scrollbar-gutter:stable}#accounts label{overflow-wrap:anywhere}#accounts [hidden]{display:none!important}#sourceSearch{width:100%}.account-list span{min-width:0}.account-list em{flex-shrink:0}@media(max-width:600px){.field-row{grid-template-columns:1fr}.overview>div{min-width:0}.panel-title{flex-wrap:wrap}}

@@ -172,6 +172,13 @@ class Storage:
             db.execute('INSERT INTO email_records(email,account_id,created_at) VALUES (?,?,?)',
                        (email, account_id, datetime.now(timezone.utc).isoformat()))
 
+    def add_email_once(self, email, account_id):
+        """恢复分裂地址配置时不重复写入邮箱列表，也不改变既有归属。"""
+        with self.connect() as db:
+            db.execute('INSERT INTO email_records(email,account_id,created_at) '
+                       'SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM email_records WHERE email=?)',
+                       (email, account_id, datetime.now(timezone.utc).isoformat(), email))
+
     def backfill_creation_times(self, account_id, aliases):
         """Fill missing timestamps from Apple without changing existing times or ownership."""
         changed = 0
@@ -229,10 +236,10 @@ class Storage:
             text = encode(entry)
             db.execute('INSERT OR IGNORE INTO task_logs(digest,data) VALUES (?,?)', (hashlib.sha256(text.encode()).hexdigest(),text))
 
-    def save_auto(self, state):
+    def save_auto(self, state, kind='auto'):
         with self.connect() as db:
             db.execute('INSERT INTO documents VALUES (?,?,?) ON CONFLICT(kind,key) DO UPDATE SET data=excluded.data',
-                       ('auto','default',encode(state)))
+                       (kind,'default',encode(state)))
             self._archive_tasks(db, state)
 
     def get_task(self, key):

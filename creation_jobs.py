@@ -6,6 +6,9 @@ from storage import Storage
 
 
 class CreationJobs:
+    # 不同创建任务使用独立记录，但复用串行执行、取消和结果持久化。
+    document_kind = "creation_job"
+    target_label = "账号"
     def __init__(self, manager, on_result=None):
         self.manager = manager
         candidate = getattr(manager, "storage", None)
@@ -25,10 +28,10 @@ class CreationJobs:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None and self.storage:
-                job = self.storage.read_document("creation_job", job_id)
+                job = self.storage.read_document(self.document_kind, job_id)
                 if job and job.get("status") == "running":
                     job.update(status="interrupted", error="服务重启，未自动重试该任务")
-                    self.storage.write_document("creation_job", job, job_id)
+                    self.storage.write_document(self.document_kind, job, job_id)
             return copy.deepcopy(job) if job else None
 
     def start(self, account_ids, count=1, label="", interval=3, repair=None, item_interval=0):
@@ -46,7 +49,10 @@ class CreationJobs:
 
     def _persist(self, job_id):
         if self.storage:
-            self.storage.write_document("creation_job", self._jobs[job_id], job_id)
+            self.storage.write_document(self.document_kind, self._jobs[job_id], job_id)
+
+    def create_item(self, target, label):
+        return self.manager.create_aliases_for_account(target, 1, label)[0]
 
     def cancel(self, job_id):
         with self._lock:
@@ -80,13 +86,13 @@ class CreationJobs:
                 for ordinal, target in enumerate(targets):
                     if cancel.is_set(): break
                     with self._lock:
-                        self._jobs[job_id]["progress"] = f"账号 {index + 1}/{len(account_ids)}，邮箱 {ordinal + 1}/{len(targets)}：创建并配置收件"
+                        self._jobs[job_id]["progress"] = f"{self.target_label} {index + 1}/{len(account_ids)}，邮箱 {ordinal + 1}/{len(targets)}：创建并配置收件"
                         self._persist(job_id)
                     try:
                         if repair is not None:
                             result = self.manager.setup_alias_inbox(account_id, target)
                         else:
-                            result = self.manager.create_aliases_for_account(account_id, 1, label)[0]
+                            result = self.create_item(account_id, label)
                     except Exception as error:
                         result = {"ok": False, "account_id": account_id, "error": str(error)[:250]}
                     self._append(job_id, account_id, result)

@@ -412,6 +412,17 @@ class AccountManager:
 
     def setup_alias_inbox(self, acc_id: str, email: str) -> Dict:
         from mail_provisioning import MailProvisioner
+        if "+" in email:
+            from plus_addressing import setup_shared_inbox
+            from inbox_links import load_links
+            record = load_links().get(email.lower(), {})
+            if record.get("kind") != "plus" or record.get("account_id") != acc_id:
+                raise ValueError("分裂地址不存在或账号不匹配")
+            with self._workflow_lock(acc_id):
+                record = setup_shared_inbox(record["base_email"], email.lower())
+                self.storage.add_email_once(email.lower(), acc_id)
+                return {"email": email.lower(), "account_id": acc_id, "ok": True,
+                        "inbox_url": record["inbox_url"], "line": email.lower() + "----" + record["inbox_url"]}
         with self._workflow_lock(acc_id):
             client = self.get_client(acc_id, verbose=False)
             provisioner = MailProvisioner(client)

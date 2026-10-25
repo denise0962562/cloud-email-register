@@ -87,6 +87,51 @@ python icloud_hme.py create -n 5 --cookies cookies.json
 python icloud_hme.py delete --email xxx@icloud.com --cookies cookies.json
 ```
 
+## 加号地址分裂与收信验证
+
+从侧栏打开「分裂地址验证」（`/plus`），选择一个发件 iCloud 账号、1–3 个已配置收件的源地址及 1–3 个后缀。例如 `words-here.4w@icloud.com` 可生成候选 `words-here.4w+test01@icloud.com`。后缀只是原地址的变体，不是新的 Apple 账号，也不会增加云端隐藏地址计数。
+
+点击「配置并发送对照邮件」后，后台通过发件账号现有 Cookie 调用 iCloud 网页邮件接口，给原地址和加号地址各发送带唯一标记的测试邮件。无需为网页发信配置 SMTP 密码，但 Cookie 必须有效且账号已经开通 iCloud 邮件。会话返回 401、403 或 421 时停止，请在账号管理中重新导入 Cookie。网页发信协议参考 [IC-VeilMail](https://github.com/Redmig110/ic-veilmail/blob/main/src/hidemyemail_generator/icloud_mail.py) 的 `/wm/message` 调用；它不提供苹果对加号收信的支持保证。
+
+加号地址复用原地址已有的收件箱和转发通道，不创建新 Apple 别名，不添加或修改 Apple 转发规则。每个变体会生成返回该变体地址的独立公开链接，以兼容现有导入器的地址校验；**链接之间共用全部底层邮件，不提供后缀之间的收件隔离**。持有任一链接的人可以看到该原地址收件箱的邮件。
+
+在手动收信验证中，只有本次实际收到分裂地址对应的测试标记，后台才把它记为已验证、写入邮箱清单，并提供 `邮箱----收件链接` 导出。发送接口成功不代表已收信；等待结束未观察到邮件也不直接判定为“不支持”。发信请求超时保留“结果未知”，不会自动重发。停止、失败或超时保留已配置的链接供重试；后缀相同会复用已有链接。服务重启将未结束任务标记为中断，不会重发。验证任务及结果使用现有 SQLite `documents` 表保存，类型为 `plus_job`。
+
+接口：
+
+- `GET /api/plus-addresses`：列出可用于验证的本地原地址和发件账号，不返回 Cookie。
+- `POST /api/plus-jobs`：`{"sender_id":"账号ID","bases":["原地址@icloud.com"],"tags":["test01"],"timeout":120}`，异步启动，返回 `job_id`。等待时间为 30–300 秒，同一进程同时只运行一个加号测试。
+- `GET /api/plus-jobs/{job_id}`：查看每封邮件的发信和收件结果，轮询不会再次发信。
+- `POST /api/plus-jobs/{job_id}/cancel`：停止后续发信和等待，已经发出的邮件不会撤回。
+- `GET /api/plus-jobs/{job_id}/export`：仅导出本次验证成功的加号地址。
+
+导入的 SQL、Cookie 和数据库含敏感信息，不应提交；`webui_with_cookies_*.sql` 已加入 Git 忽略。
+
+## 自动分裂、定时任务与地址类型
+
+侧栏的「自动分裂」（`/auto-plus`）复用自动注册的配置、倒计时、任务历史、日志、结果弹窗和下载状态。选择 1–20 个已配置收件的**源地址**，设置每源每轮数量、后缀前缀、地址间隔和固定或随机调度间隔。初次安装默认关闭，默认每 60 分钟、每源地址 10 个；开启后先等待一个配置间隔，也可以立即执行一轮。
+
+每轮按源地址串行生成随机后缀，配置收件链接并写入同一「邮箱列表」。同源地址间使用现有工作流锁，暂停后完成当前地址即停止；配置失败的地址会保留到列表，后续轮次优先续配，不重复写入。自动分裂复用源地址的收件通道，无需新建 Apple 隐藏地址或转发规则，不增加 Apple 云端别名计数，也不会自动发送测试邮件。链接配置成功显示「收件已配置 · 待实测」，只有实际投递验证成功才显示「已实收」。
+
+邮箱列表统一使用两种类型：**源地址**和**分裂地址**。分裂地址显示所属源地址，支持类型筛选；复制、CSV 和 TXT 导出与当前类型筛选一致。分裂地址的独立链接仍然与源地址共用全部底层邮件，不提供同源地址之间的收件隔离。导出的链接可以继续用于现有中转邮箱导入器。
+
+任务开关、配置、历史、倒计时和下载状态保存在现有 SQLite，自动分裂使用 `documents.kind=auto_plus`，创建记录使用 `plus_creation_job`，与自动注册分别保存。服务启动会恢复调度；重启中断的轮次标记为中断，不会重新生成同一轮。单轮最大 200 个是本工具的批次限制，不是苹果每源地址的总量限制，后续轮次可继续生成。
+
+接口：
+
+- `GET /api/auto-plus/sources`：列出可分裂的源地址。
+- `GET/POST /api/auto-plus`：查看或保存配置，字段为 `enabled`、`base_emails`、`count`、`interval_mode`、`interval_minutes`、`min_minutes`、`max_minutes`、`item_interval_seconds`、`label`（ASCII 后缀前缀，1–10 位）。
+- `POST /api/auto-plus/run`：按当前或提交的配置异步执行一轮，返回 `job_id`。
+- `GET /api/auto-plus/tasks/{job_id}`、`GET /api/auto-plus/tasks/{job_id}/export`：查看或导出该轮已配置成功的结果。
+- `GET /api/emails`：每条增加 `address_type`（`source` / `split`）、`address_type_label`、`source_email`、`shared_inbox` 和独立的 `inbox_verified` 状态。
+- `GET /api/inbox-links/export?address_type=source|split|all`：按类型导出，仍可与 `account_id` 组合。
+
+### 分裂数量的已知边界
+
+加号后缀不是向苹果注册新的隐藏地址，因此隐藏地址创建额度不能直接当作分裂数量上限。苹果没有在已查阅的官方资料中给出每源地址加号后缀的数量承诺；[iCloud 条款](https://www.apple.com/legal/internet-services/icloud/)仍保留服务限制权。邮箱本地部分（`@` 前）有 [RFC 5321 的 64 字节长度边界](https://www.rfc-editor.org/rfc/rfc5321.html#section-4.5.3.1.1)，本工具只生成 ASCII 后缀并校验长度。
+
+2026-10-25 的本地实测：同一源地址成功生成并发布 100 个不同分裂地址的链接；实际发送的 1 封源地址对照与 11 封不同分裂地址邮件全部实收，下一次发送被微软发件服务 HTTP 429 限流后停止。因此可以确认这批配置和已投递样本有效，不能宣称苹果的确切数量上限或“无限分裂”。测试原始记录包含真实邮箱和收件凭据，只保存在 Git 忽略的本地 `results/` 中。
+
 ## Cookie 获取
 
 | 方式 | 说明 |

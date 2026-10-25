@@ -259,16 +259,17 @@ class ICloudHME:
         if self.verbose:
             print(f"  [iCloud] {msg}")
 
-    def _build_url(self, url: str) -> str:
+    def _build_url(self, url: str, client_build_number: str = CLIENT_BUILD_NUMBER) -> str:
         parsed = urlparse(url)
         params = parse_qs(parsed.query, keep_blank_values=True)
-        params["clientBuildNumber"] = [CLIENT_BUILD_NUMBER]
-        params["clientMasteringNumber"] = [CLIENT_BUILD_NUMBER]
+        params["clientBuildNumber"] = [client_build_number]
+        params["clientMasteringNumber"] = [client_build_number]
         return urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
 
     def _request(self, method: str, url: str, json_data: Any = None,
-                 timeout: int = REQUEST_TIMEOUT, max_attempts: int = MAX_RETRIES) -> Any:
-        full_url = self._build_url(url)
+                 timeout: int = REQUEST_TIMEOUT, max_attempts: int = MAX_RETRIES,
+                 client_build_number: str = CLIENT_BUILD_NUMBER, content_type: Optional[str] = None) -> Any:
+        full_url = self._build_url(url, client_build_number)
         headers = {
             "Origin": self.origin,
             "Referer": self.origin + "/",
@@ -276,6 +277,8 @@ class ICloudHME:
             "Content-Type": "text/plain;charset=UTF-8" if "maildomainws" in urlparse(url).hostname
             else "application/json",
         }
+        if content_type:
+            headers["Content-Type"] = content_type
 
         body = json.dumps(json_data, ensure_ascii=False) if json_data is not None else None
         last_err = None
@@ -312,10 +315,10 @@ class ICloudHME:
 
     # ---- 会话 ----
 
-    def validate_session(self) -> Dict:
+    def validate_session(self, max_attempts: int = MAX_RETRIES) -> Dict:
         """校验 iCloud 会话，获取 Hide My Email 服务端点及账号身份"""
         self._log("校验 iCloud 会话...")
-        data = self._request("POST", f"{self.setup_url}/validate", timeout=20)
+        data = self._request("POST", f"{self.setup_url}/validate", timeout=20, max_attempts=max_attempts)
         premium = data.get("webservices", {}).get("premiummailsettings", {})
         if not premium.get("url"):
             raise RuntimeError(

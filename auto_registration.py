@@ -15,19 +15,27 @@ DEFAULTS = {"enabled": False, "account_ids": [], "count": 5, "interval_mode": "r
 
 
 class AutoRegistration:
+    # 调度、历史和下载状态共用同一实现，具体任务只定义目标与配置约束。
+    defaults = DEFAULTS
+    document_kind = "auto"
+    target_key = "account_ids"
+    target_label = "账号"
+    count_limit = 20
+    target_limit = None
+
     def __init__(self, jobs, manager, path, *, clock=time.time, randint=random.randint):
         self.jobs, self.manager, self.path = jobs, manager, Path(path)
         self.clock, self.randint = clock, randint
         self.lock = threading.RLock()
         self.wake, self.stop_event = threading.Event(), threading.Event()
         self.thread = None
-        self.config = dict(DEFAULTS)
+        self.config = copy.deepcopy(self.defaults)
         self.next_run = None
         self.current = None
         self.history, self.logs = [], []
         self.storage = Storage(database_for(self.path))
-        self.storage.import_document("auto", self.path)
-        data = self.storage.read_document("auto")
+        self.storage.import_document(self.document_kind, self.path)
+        data = self.storage.read_document(self.document_kind)
         if data is not None:
             self.config.update(data.get("config", {}))
             self.next_run = data.get("next_run")
@@ -54,27 +62,39 @@ class AutoRegistration:
 
     def persist(self):
         self.storage.save_auto({"config": self.config, "next_run": self.next_run, "current": self.current,
-                                "history": self.history[:40], "logs": self.logs})
+                                "history": self.history[:40], "logs": self.logs}, kind=self.document_kind)
+
+    def valid_target(self, target):
+        return bool(self.manager.get_account(target))
+
+    def validate_label(self, label):
+        if not isinstance(label, str) or len(label) > 100:
+            raise ValueError("标签最多 100 字")
 
     def configure(self, data):
         with self.lock:
-            if not isinstance(data, dict) or set(data) - set(DEFAULTS):
+            if not isinstance(data, dict) or set(data) - set(self.defaults):
                 raise ValueError("自动创建配置字段无效")
             config = {**self.config, **data}
             if type(config["enabled"]) is not bool: raise ValueError("开关必须为布尔值")
-            ids = config["account_ids"]
-            if not isinstance(ids, list) or any(not isinstance(a, str) or not self.manager.get_account(a) for a in ids):
-                raise ValueError("请选择有效账号")
-            config["account_ids"] = list(dict.fromkeys(ids))
-            if config["enabled"] and not ids: raise ValueError("开启前请至少选择一个账号")
-            for key, low, high in (("count", 1, 20), ("interval_minutes", 1, 10080),
+            ids = config[self.target_key]
+            # 已移除的目标不能阻止用户关闭调度和取消当前任务。
+            disabling = data.get("enabled") is False
+            if (not isinstance(ids, list) or any(not isinstance(a, str) for a in ids)
+                    or (not disabling and any(not self.valid_target(a) for a in ids))):
+                raise ValueError("请选择有效" + self.target_label)
+            config[self.target_key] = list(dict.fromkeys(ids))
+            if self.target_limit and len(config[self.target_key]) > self.target_limit:
+                raise ValueError(f"每次最多选择 {self.target_limit} 个{self.target_label}")
+            if config["enabled"] and not ids: raise ValueError("开启前请至少选择一个" + self.target_label)
+            for key, low, high in (("count", 1, self.count_limit), ("interval_minutes", 1, 10080),
                                    ("min_minutes", 1, 10080), ("max_minutes", 1, 10080),
                                    ("item_interval_seconds", 0, 300)):
                 if type(config[key]) is not int or not low <= config[key] <= high:
                     raise ValueError(f"{key} 必须为 {low} 到 {high} 的整数")
             if config["interval_mode"] not in ("fixed", "random"): raise ValueError("请选择固定或随机间隔")
             if config["min_minutes"] > config["max_minutes"]: raise ValueError("最小间隔不能大于最大间隔")
-            if not isinstance(config["label"], str) or len(config["label"]) > 100: raise ValueError("标签最多 100 字")
+            self.validate_label(config["label"])
             changed = config != self.config
             self.config = config
             if not config["enabled"]:
@@ -96,8 +116,8 @@ class AutoRegistration:
             if self.current or self.jobs.active: raise RuntimeError("已有任务运行，请等待完成")
             if config:
                 self.configure(config)
-            ids = self.config["account_ids"]
-            if not ids: raise ValueError("请至少选择一个账号")
+            ids = self.config[self.target_key]
+            if not ids: raise ValueError("请至少选择一个" + self.target_label)
             # Session failures are reported as normal job results; do not silently skip accounts.
             job_id = self.jobs.start(ids, self.config["count"], self.config["label"],
                                      item_interval=self.config["item_interval_seconds"])
@@ -107,7 +127,7 @@ class AutoRegistration:
                             "lines": [], "total_created": 0, "total_errors": 0}
             if scheduled:
                 self.next_run = None
-            self.log("info", f"任务 {job_id[:8]} 开始：{len(ids)} 个账号，每账号 {self.config['count']} 个")
+            self.log("info", f"任务 {job_id[:8]} 开始：{len(ids)} 个{self.target_label}，每个 {self.config['count']} 个")
             self.persist()
             self.wake.set()
             return job_id
