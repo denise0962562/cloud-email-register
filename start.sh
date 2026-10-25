@@ -2,6 +2,7 @@
 set -eu
 cd "$(dirname "$0")"
 umask 077
+export AUTH_COOKIE_SECURE="${AUTH_COOKIE_SECURE:-0}"
 # Use macOS's certificate bundle, including locally trusted roots.
 if [ "$(uname -s)" = Darwin ] && [ -f /etc/ssl/cert.pem ]; then
     export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-/etc/ssl/cert.pem}"

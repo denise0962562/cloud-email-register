@@ -84,6 +84,7 @@ def main(argv=None):
         command = [str(python), '-u', str(ROOT / 'web_ui.py'), '--host', '127.0.0.1',
                    '--port', '2224', '--no-sync', *extra]
         print('Starting iCloud HME: http://127.0.0.1:2224', flush=True)
+        os.environ.setdefault('AUTH_COOKIE_SECURE', '0')
         return subprocess.call(command, cwd=ROOT)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print('Cannot start/restart service: '+str(error), file=sys.stderr)

@@ -1,3 +1,4 @@
+from tests.auth_helpers import admin_client
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,7 @@ from inbox_links import export_lines, save_link, update_link
 
 class WebWorkflowTest(unittest.TestCase):
     def setUp(self):
-        self.client = web_ui.app.test_client()
+        self.client = admin_client()
 
     def test_text_export_filters_accounts_and_omits_incomplete_records(self):
         with tempfile.TemporaryDirectory() as folder:

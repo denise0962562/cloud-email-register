@@ -1,3 +1,4 @@
+from tests.auth_helpers import admin_client
 import copy
 import tempfile
 import threading
@@ -119,7 +120,7 @@ class AutoPlusTest(unittest.TestCase):
         with patch.object(web_ui,'email_storage',return_value=self.store), \
                 patch.object(web_ui,'load_links',side_effect=lambda:copy.deepcopy(self.records)), \
                 patch.object(web_ui,'export_lines',side_effect=lambda emails:list(emails)):
-            client = web_ui.app.test_client()
+            client = admin_client()
             rows = client.get('/api/emails').json['emails']
             self.assertEqual({r['address_type_label'] for r in rows},{'源地址','分裂地址'})
             split = next(r for r in rows if r['address_type']=='split')

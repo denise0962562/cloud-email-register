@@ -1,3 +1,4 @@
+from tests.auth_helpers import admin_client
 import tempfile
 import threading
 import unittest
@@ -104,7 +105,7 @@ class AutoRegistrationTest(unittest.TestCase):
         self.auto.tick()
         other = {**self.auto.history[0], "job_id": "other"}
         self.auto.history.append(other)
-        client = web_ui.app.test_client()
+        client = admin_client()
         with patch.object(web_ui, "_auto_registration", self.auto):
             response = client.get("/api/auto-registration/tasks/job1")
             self.assertFalse(response.json["task"].get("downloaded", False))
@@ -124,7 +125,7 @@ class AutoRegistrationTest(unittest.TestCase):
         self.jobs.get.return_value = self.job(status="completed", total_errors=1)
         self.auto.tick()
         with patch.object(web_ui, "_auto_registration", self.auto):
-            response = web_ui.app.test_client().get("/api/auto-registration/tasks/job1/export")
+            response = admin_client().get("/api/auto-registration/tasks/job1/export")
         self.assertEqual(response.status_code, 409)
         self.assertFalse(self.auto.get_task("job1").get("downloaded", False))
 
@@ -195,7 +196,7 @@ class AutoRegistrationTest(unittest.TestCase):
             self.assertEqual(self.auto.storage.read_document("auto"), before)
 
     def test_api_returns_async_job_and_validates_config(self):
-        client = web_ui.app.test_client()
+        client = admin_client()
         self.auto.configure({"account_ids": ["a1"]})
         with patch.object(web_ui, "_auto_registration", self.auto):
             self.assertEqual(client.post("/api/auto-registration", json={"count": -1}).status_code, 400)
@@ -216,7 +217,7 @@ class AutoRegistrationTest(unittest.TestCase):
         self.jobs.get.return_value["status"] = "completed"
         self.auto.tick()
         with patch.object(web_ui, "_auto_registration", self.auto):
-            response = web_ui.app.test_client().get("/api/auto-registration/export")
+            response = admin_client().get("/api/auto-registration/export")
             self.assertEqual(response.mimetype, "text/plain")
             self.assertEqual(response.text, "one@icloud.com----https://mail.example/one\n")
 

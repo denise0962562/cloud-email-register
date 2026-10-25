@@ -19,10 +19,14 @@
 # 1. 安装依赖
 pip install -r requirements.txt
 
-# 2. 启动 Web UI
+# 2. 创建管理员（只在本机终端初始化，不开放网页注册）
+python manage_admin.py init --username admin
+
+# 3. 启动 Web UI（仅本地 HTTP 开发时允许非 Secure Cookie）
+AUTH_COOKIE_SECURE=0 python web_ui.py --host 127.0.0.1
 python web_ui.py
 
-# 3. 打开 http://127.0.0.1:2224
+# 4. 打开 http://127.0.0.1:2224 并登录管理员
 #    点击左下角「导入 Cookie」添加第一个账号
 #    支持粘贴 Cookie Editor 的 Header String 或 JSON
 ```
@@ -145,6 +149,35 @@ python icloud_hme.py delete --email xxx@icloud.com --cookies cookies.json
 - **JSON**：`{"name1":"value1", "name2":"value2"}`
 
 导入后自动持久化到项目目录 `icloud_hme.sqlite3`，重启无需重新粘贴。
+
+## 管理员登录与公开 API 授权
+
+后台页面、账号/Cookie 管理、任务、日志、邮箱及配置接口均需要管理员会话。未登录的页面跳转 `/login`，管理 API 返回 HTTP 401。没有管理员时也不会匿名开放；首次通过本机或服务器终端执行 `python manage_admin.py init --username admin`，交互输入至少 12 字符的密码。忘记密码可执行 `python manage_admin.py reset-password`。
+
+管理员密码使用 Werkzeug scrypt 哈希；随机会话令牌与 API Key 仅保存 SHA-256 摘要。认证数据单独保存在被 Git 忽略的 `admin_auth.sqlite3`，邮箱备份导入不应覆盖此文件。备份生产环境时也应备份此认证数据库。
+
+会话默认自登录起固定 **30 天**，访问不会自动延期，重启服务仍然有效。可设置环境变量 `ADMIN_SESSION_DAYS`（1–365）调整新会话期限。退出登录立即撤销当前会话；修改或重置密码立即撤销全部管理员会话。后台写请求还需 `X-CSRF-Token`，从 `GET /api/auth/session` 获取，内置页面自动携带。实时事件流在会话失效后停止输出。
+
+登录 Cookie 使用 HttpOnly、SameSite=Lax，默认要求 HTTPS（`AUTH_COOKIE_SECURE=1`）。生产通过 Caddy HTTPS 访问；本地 `start.sh` 和 Windows 启动器为回环 HTTP 设置 `AUTH_COOKIE_SECURE=0`。直接运行 Python 并使用本地 HTTP 时也需显式设置该变量，生产不得沿用此开发设置。
+
+登录后从侧栏打开「管理账号与 API Key」（`/admin/security`），可修改密码、退出、创建和吊销密钥。完整 API Key 只显示一次；丢失后创建新密钥并吊销旧密钥。密钥有效期持续到吊销，独立于管理员会话。
+
+| 公开接口 | 必需的 API Key 权限 | 用途 |
+| --- | --- | --- |
+| `GET /api/public/emails` | `emails:read` | 本地邮箱列表及已就绪的收件链接 |
+| `GET /api/public/inbox-links/export` | `inbox-links:read` | `邮箱----收件链接` 导出，沿用账号/地址类型筛选 |
+| `GET /api/public/mail?email=...&alias=...` | `mail:read` | 按主邮箱或指定别名读取邮件，沿用 limit/days 参数 |
+
+公开接口必须携带 `Authorization: Bearer <API Key>` 或 `X-API-Key: <API Key>`。不接受 URL 参数中的密钥，管理员 Cookie 也不能代替公开接口的 API Key；错误或已吊销的密钥返回 401，权限不足返回 403。密钥不能调用账号管理、Cookie、任务或密钥管理接口。上述权限覆盖当前全部邮箱及其邮件，请只授予调用方实际需要的权限。
+
+```bash
+curl https://icloud.tumeiapi.com/api/public/emails \
+  -H 'Authorization: Bearer <API Key>'
+curl https://icloud.tumeiapi.com/api/public/inbox-links/export \
+  -H 'Authorization: Bearer <API Key>'
+```
+
+原 `/api/emails`、`/api/inbox-links/export`、`/api/mail` 保留为需要管理员会话的后台接口。外部程序应改用 `/api/public/` 对应路径。独立的 `webmail.fastaiapi.cloud/m/*` 收件服务继续使用原有随机收件令牌，不受本项目管理员登录影响。`GET /healthz` 仅公开返回存活状态，不暴露账号或数据。
 
 ## 一键创建与收件链接
 

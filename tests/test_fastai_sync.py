@@ -1,3 +1,4 @@
+from tests.auth_helpers import admin_client
 import tempfile
 import time
 import threading
@@ -54,7 +55,7 @@ class FastAISyncTest(unittest.TestCase):
     def test_batch_validation_and_new_panel_routes(self):
         for invalid in [0,10001,True,1.5,'5']:
             with self.assertRaises(ValueError): self.sync.configure({'batch_size':invalid})
-        client=web_ui.app.test_client()
+        client=admin_client()
         for route in ['/fastai-sync','/fastai-sync-panel','/static/fastai_sync_panel.js']:
             with client.get(route) as response:
                 self.assertEqual(response.status_code,200)
@@ -190,7 +191,7 @@ class FastAISyncTest(unittest.TestCase):
         self.assertEqual(restored.snapshot()['pending'],0)
 
     def test_api_reports_status_and_persists_settings(self):
-        self.alias();client=web_ui.app.test_client()
+        self.alias();client=admin_client()
         with patch.object(web_ui,'_fastai_sync',self.sync):
             self.assertEqual(client.post('/api/fastai-sync',json={'interval_minutes':0}).status_code,400)
             self.assertTrue(client.post('/api/fastai-sync',json={'interval_minutes':3}).json['ok'])
@@ -202,7 +203,7 @@ class FastAISyncTest(unittest.TestCase):
             self.assertEqual(client.get('/api/fastai-sync/jobs/absent').status_code,404)
 
     def test_email_column_only_marks_confirmed_import_for_current_target_and_link(self):
-        self.alias();client=web_ui.app.test_client()
+        self.alias();client=admin_client()
         with patch.object(web_ui,'_fastai_sync',self.sync), patch.object(web_ui,'email_storage',return_value=self.db), \
                 patch.object(web_ui,'load_links',side_effect=self.db.load_links):
             self.assertFalse(client.get('/api/emails').json['emails'][0]['fastai_synced'])

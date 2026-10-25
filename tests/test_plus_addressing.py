@@ -1,3 +1,4 @@
+from tests.auth_helpers import admin_client
 import copy
 import json
 import tempfile
@@ -161,7 +162,7 @@ class PlusApiTest(unittest.TestCase):
     def setUp(self):
         import web_ui
         self.web = web_ui
-        self.client = web_ui.app.test_client()
+        self.client = admin_client()
 
     def test_non_object_payload_does_not_start_a_job(self):
         with patch.object(self.web._plus_jobs, 'start') as start:

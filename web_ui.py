@@ -25,6 +25,8 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
+from auth_web import install_auth
+install_auth(app, HERE)
 _log_queue = queue.Queue()
 _today_key = datetime.now().strftime("%Y%m%d")
 _global_state = {"running":False,"creating":False,"round_status":"","total_created":0,"today_created":0,"current_round_created":0,"next_trigger":None,"last_error":None,"cookies_ok":False,"alias_count":0,"alias_active":0}
@@ -428,6 +430,7 @@ def api_specific_alias_mail(acc_id, alias_email):
         return jsonify({"emails":msgs,"count":len(msgs),"alias":alias_email})
     except Exception as e: return jsonify({"emails":[],"count":0,"error":str(e)})
 
+@app.route("/api/public/mail")
 @app.route("/api/mail")
 def api_mail_by_email():
     email = request.args.get("email","").strip().lower()
@@ -502,6 +505,7 @@ def api_fastai_sync_job(job_id):
     return jsonify(ok=True,job=job)
 
 
+@app.route("/api/public/emails")
 @app.route("/api/emails")
 def api_emails():
     limit = request.args.get("limit",0,type=int)
@@ -583,6 +587,7 @@ def api_export_creation_job(job_id):
     if not job: return jsonify(ok=False, error="任务不存在"), 404
     return _text_export(job["lines"])
 
+@app.route("/api/public/inbox-links/export")
 @app.route("/api/inbox-links/export")
 def api_export_inbox_links():
     account_filter = request.args.get("account_id", "")
