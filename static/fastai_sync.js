@@ -1,4 +1,4 @@
-/* FastAI import jobs use the local backend; this page never receives Apple cookies. */
+/* FastAI 导入任务由本地后端执行，页面不接收 Apple Cookie。 */
 var fastaiSyncSnapshot=null, fastaiPollId=null, fastaiPolling=false;
 function fastaiStatusHtml(email){
   var status=email.fastai_synced?'synced':email.fastai_sync_status;
@@ -21,6 +21,8 @@ function ensureFastaiDialogs(){
     '<div class="fastai-dialog-heading"><h2 id="fastaiConfigTitle">FastAI 同步配置</h2><button class="btn btn-outline btn-sm" id="fsConfigClose">关闭</button></div>'+
     '<label class="fastai-field">FastAI 导入接口地址<input id="fsApiUrl" type="url" placeholder="http://127.0.0.1:8766/api/import"></label>'+
     '<p class="fastai-hint">填写 gpt-auto-register 的导入接口地址。只填服务根地址时，会补上 /api/import。</p>'+
+    '<label class="fastai-field">接口 Token<input id="fsApiToken" type="password" maxlength="8192" autocomplete="new-password" placeholder="输入 Token，无需填写 Bearer 前缀"></label>'+
+    '<p class="fastai-hint" id="fsTokenHint"></p><label class="fastai-check"><input id="fsClearToken" type="checkbox"> 清除已保存的 Token</label>'+
     '<label class="fastai-check"><input id="fsEnabled" type="checkbox"> 自动同步未同步邮箱</label>'+
     '<label class="fastai-field">执行间隔（分钟）<input id="fsInterval" type="number" min="1" max="10080" step="1"></label>'+
     '<p class="fastai-hint">配置保存在本项目 SQLite。开启后先等待设定间隔；保存配置保留已排定时间，新间隔用于下次重新计时。当前任务继续使用启动时的接口地址。</p>'+
@@ -51,6 +53,8 @@ async function openFastaiConfig(){
   try{
     var state=await loadFastaiSyncState(),c=state.config;
     E('fsApiUrl').value=c.api_url;E('fsEnabled').checked=c.enabled;E('fsInterval').value=c.interval_minutes;
+    E('fsApiToken').value='';E('fsClearToken').checked=false;
+    E('fsTokenHint').textContent=c.api_token_configured?'已配置 Token；留空保留，输入新值替换。':'未配置 Token；留空不使用授权。';
     E('fsConfigMessage').textContent='';
     E('fsNextRun').textContent=state.next_run?'下次执行：'+new Date(state.next_run*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'})+'（北京时间）':'自动同步未开启';
     E('fastaiConfigDialog').showModal();
@@ -59,9 +63,11 @@ async function openFastaiConfig(){
 async function saveFastaiConfig(){
   var button=E('fsConfigSave');button.disabled=true;
   try{
-    var data=await fastaiRequest('/api/fastai-sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_url:E('fsApiUrl').value.trim(),enabled:E('fsEnabled').checked,interval_minutes:Number(E('fsInterval').value)})});
+    var data=await fastaiRequest('/api/fastai-sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({... (E('fsClearToken').checked?{api_token:''}:E('fsApiToken').value.trim()?{api_token:E('fsApiToken').value.trim()}:{}),api_url:E('fsApiUrl').value.trim(),enabled:E('fsEnabled').checked,interval_minutes:Number(E('fsInterval').value)})});
     fastaiSyncSnapshot=data;E('fsConfigMessage').textContent='配置已保存';
     E('fsApiUrl').value=data.config.api_url;
+    E('fsApiToken').value='';E('fsClearToken').checked=false;
+    E('fsTokenHint').textContent=data.config.api_token_configured?'已配置 Token；留空保留，输入新值替换。':'未配置 Token；留空不使用授权。';
     E('fsNextRun').textContent=data.next_run?'下次执行：'+new Date(data.next_run*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'})+'（北京时间）':'自动同步未开启';
     await refreshEmails();await loadFastaiSyncState();
   }catch(error){E('fsConfigMessage').textContent=error.message;}finally{button.disabled=false;}

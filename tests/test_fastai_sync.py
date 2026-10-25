@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import requests
 from storage import Storage
 from fastai_sync import FastAISync
+from admin_auth import AuthStore
 import web_ui
 
 
@@ -19,6 +20,9 @@ def accepted(action='inserted'):
 class FastAISyncTest(unittest.TestCase):
     def setUp(self):
         self.folder=tempfile.TemporaryDirectory();self.addCleanup(self.folder.cleanup)
+        auth = AuthStore(Path(self.folder.name)/'auth.sqlite3')
+        auth_patch = patch.dict(web_ui.app.extensions, {'admin_auth': auth})
+        auth_patch.start(); self.addCleanup(auth_patch.stop)
         self.db=Storage(Path(self.folder.name)/'sync.sqlite3')
         self.http=Mock();self.http.post.return_value=accepted()
         self.now=1000
@@ -33,6 +37,78 @@ class FastAISyncTest(unittest.TestCase):
         while self.sync.active and time.monotonic()<deadline:time.sleep(.005)
         self.assertIsNone(self.sync.active)
         return self.sync.get_job(job['id'])
+
+    def test_bearer_token_persists_without_exposing_in_status_or_jobs(self):
+        self.alias()
+        client = admin_client()
+        with patch.object(web_ui, '_fastai_sync', self.sync):
+            response = client.post('/api/fastai-sync', json={'api_token': 'Bearer test-secret-123'})
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json['config']['api_token_configured'])
+            self.assertNotIn('test-secret-123', response.get_data(as_text=True))
+            self.assertNotIn('api_token', response.json['config'])
+            self.sync.configure({'batch_size': 1})
+            restored = FastAISync(self.db, http_factory=lambda: self.http)
+            self.assertEqual(restored.config['api_token'], 'test-secret-123')
+            self.assertNotIn('test-secret-123', client.get('/api/fastai-sync').get_data(as_text=True))
+            job = self.wait(self.sync.start())
+            self.assertNotIn('test-secret-123', str(job))
+            self.assertNotIn('test-secret-123', str(self.sync.snapshot()))
+        options = self.http.post.call_args.kwargs
+        self.assertEqual(options['headers'], {'Authorization': 'Bearer test-secret-123'})
+        self.assertFalse(options['allow_redirects'])
+
+    def test_token_clearing_and_legacy_config_without_token(self):
+        self.alias()
+        self.sync.configure({'api_token': 'old-token'})
+        self.sync.configure({'api_token': ''})
+        self.wait(self.sync.start())
+        self.assertEqual(self.http.post.call_args.kwargs['headers'], {})
+        self.assertFalse(FastAISync(self.db).snapshot()['config']['api_token_configured'])
+        self.db.write_document('fastai_sync_state', {'config': {'enabled': False}})
+        self.assertEqual(FastAISync(self.db).config['api_token'], '')
+
+    def test_invalid_token_does_not_change_saved_config(self):
+        self.sync.configure({'api_token': 'valid-token'})
+        before = self.db.read_document('fastai_sync_state')
+        for token in (None, 42, 'x' * 8193, 'bad token', 'bad\r\nHeader: injected', '中文'):
+            with self.subTest(token_type=type(token).__name__):
+                with self.assertRaises(ValueError):
+                    self.sync.configure({'api_token': token})
+                self.assertEqual(self.db.read_document('fastai_sync_state'), before)
+
+    def test_running_round_keeps_token_and_next_scheduled_round_uses_new_token(self):
+        self.alias(); self.alias('two@icloud.com')
+        entered, release = threading.Event(), threading.Event()
+        def blocked(*args, **kwargs):
+            entered.set(); release.wait(2)
+            return accepted()
+        self.http.post.side_effect = blocked
+        self.sync.configure({'api_token': 'round-token'})
+        job = self.sync.start()
+        self.assertTrue(entered.wait(1))
+        try:
+            self.sync.configure({'api_token': 'next-token'})
+        finally:
+            release.set()
+        self.assertEqual(self.wait(job)['succeeded'], 2)
+        for call in self.http.post.call_args_list:
+            self.assertEqual(call.kwargs['headers']['Authorization'], 'Bearer round-token')
+        self.alias('three@icloud.com')
+        self.sync.configure({'enabled': True, 'interval_minutes': 1})
+        self.now += 60
+        self.sync.tick()
+        self.assertEqual(self.wait({'id': self.sync.latest})['succeeded'], 1)
+        self.assertEqual(self.http.post.call_args.kwargs['headers']['Authorization'], 'Bearer next-token')
+
+    def test_redirect_is_not_confirmed_or_marked_synced(self):
+        self.alias()
+        self.sync.configure({'api_token': 'redirect-token'})
+        self.http.post.return_value = Mock(status_code=302)
+        job = self.wait(self.sync.start())
+        self.assertEqual(job['succeeded'], 0)
+        self.assertEqual(self.sync.snapshot()['pending'], 1)
+        self.assertFalse(self.http.post.call_args.kwargs['allow_redirects'])
 
     def test_round_limit_all_override_and_durable_logs_history(self):
         for n in range(5): self.alias(f'box{n}@icloud.com')

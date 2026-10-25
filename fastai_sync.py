@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 import requests
 from inbox_links import is_ready
 
-DEFAULTS = {'api_url': 'http://127.0.0.1:8766/api/import', 'enabled': False, 'interval_minutes': 60, 'batch_size': 50, 'include_synced': False}
+DEFAULTS = {'api_url': 'http://127.0.0.1:8766/api/import', 'enabled': False, 'interval_minutes': 60, 'batch_size': 50, 'include_synced': False, 'api_token': ''}
 
 
 class ImportErrorDetail(RuntimeError):
@@ -109,7 +109,10 @@ class FastAISync:
                 history = [json.loads(row[0]) for row in db.execute(
                     "SELECT data FROM documents WHERE kind='fastai_sync_job' ORDER BY json_extract(data,'$.started_at') DESC,rowid DESC LIMIT 40")]
             history = [{k:v for k,v in entry.items() if k != 'items'} for entry in history]
-            return {'history':history,'logs':copy.deepcopy(self.logs),'current':job if self.active else None,'config':copy.deepcopy(self.config),'next_run':self.next_run,
+            # 对外仅返回凭据状态，避免轮询接口回传 Token。
+            public_config = {k:v for k,v in self.config.items() if k != 'api_token'}
+            public_config['api_token_configured'] = bool(self.config['api_token'])
+            return {'history':history,'logs':copy.deepcopy(self.logs),'current':job if self.active else None,'config':public_config,'next_run':self.next_run,
                     'server_time':self.clock(),'pending':len(self.pending()),
                     'eligible':len(self.pending(include_synced=self.config['include_synced'])),'job':job}
 
@@ -118,6 +121,15 @@ class FastAISync:
             if not isinstance(data,dict) or set(data) - set(DEFAULTS): raise ValueError('同步配置字段无效')
             config = {**self.config, **data}
             config['api_url'] = normalize_api_url(config['api_url'])
+            token = config['api_token']
+            if not isinstance(token, str) or len(token) > 8192:
+                raise ValueError('Token 必须是长度不超过 8192 的字符串')
+            token = token.strip()
+            if token.lower().startswith('bearer '):
+                token = token[7:].strip()
+            if token and any(ord(char) < 33 or ord(char) > 126 for char in token):
+                raise ValueError('Token 不能包含空格、换行或非 ASCII 字符')
+            config['api_token'] = token
             if type(config['enabled']) is not bool: raise ValueError('自动同步开关必须为布尔值')
             if type(config['interval_minutes']) is not int or not 1 <= config['interval_minutes'] <= 10080:
                 raise ValueError('同步间隔应为 1–10080 分钟的整数')
@@ -164,7 +176,7 @@ class FastAISync:
             self._persist_state()
             response = copy.deepcopy(job)
             if pending:
-                self.work_thread = threading.Thread(target=self._run,args=(job,pending),daemon=True)
+                self.work_thread = threading.Thread(target=self._run,args=(job,pending,self.config['api_token']),daemon=True)
                 self.work_thread.start()
             return response
 
@@ -182,9 +194,11 @@ class FastAISync:
                  self.clock() if status=='synced' else None,error,job['id']))
 
     @staticmethod
-    def _import(http, endpoint, row):
+    def _import(http, endpoint, row, api_token=''):
         try:
-            response = http.post(endpoint,json={'kind':'icloud_relay','text':row['email']+'----'+row['inbox_url']},timeout=(5,20))
+            headers = {'Authorization': 'Bearer ' + api_token} if api_token else {}
+            # 禁止跳转，避免目标端点将导入数据或凭据带往其他地址。
+            response = http.post(endpoint,headers=headers,allow_redirects=False,json={'kind':'icloud_relay','text':row['email']+'----'+row['inbox_url']},timeout=(5,20))
         except requests.RequestException:
             raise ImportErrorDetail('无法确认导入结果：连接失败或超时，重试会由目标接口去重',stop=True) from None
         if response.status_code != 200:
@@ -198,7 +212,7 @@ class FastAISync:
             raise ImportErrorDetail('导入接口未确认本条邮箱导入成功')
         return '新增' if counts[0] else '更新' if counts[1] else '已存在'
 
-    def _run(self, job, rows):
+    def _run(self, job, rows, api_token=''):
         http = self.http_factory()
         http.trust_env = False
         try:
@@ -210,7 +224,7 @@ class FastAISync:
                     self._save_job(job)
                 stop = False
                 try:
-                    action = self._import(http,job['api_url'],row)
+                    action = self._import(http,job['api_url'],row,api_token)
                     with self.lock:
                         self._set_status(row,job,'synced')
                         item.update(status='synced',action=action)
