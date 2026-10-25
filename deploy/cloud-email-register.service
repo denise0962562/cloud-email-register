@@ -1,0 +1,20 @@
+[Unit]
+Description=Cloud Email Register management
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fastaiapi
+Group=fastaiapi
+WorkingDirectory=/opt/fastaiapi-groups/cloud-email-register
+Environment=TZ=Asia/Shanghai
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStart=/opt/fastaiapi-groups/cloud-email-register/.venv/bin/python -u /opt/fastaiapi-groups/cloud-email-register/web_ui.py --host 127.0.0.1 --port 2224 --no-sync --disable-automation
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

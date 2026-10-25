@@ -6,4 +6,4 @@ umask 077
 if [ "$(uname -s)" = Darwin ] && [ -f /etc/ssl/cert.pem ]; then
     export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-/etc/ssl/cert.pem}"
 fi
-exec .venv/bin/python -u web_ui.py --host 127.0.0.1 --port 5050 --no-sync "$@"
+exec .venv/bin/python -u web_ui.py --host 127.0.0.1 --port 2224 --no-sync "$@"

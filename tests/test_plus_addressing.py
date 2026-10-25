@@ -192,7 +192,12 @@ class PlusApiTest(unittest.TestCase):
             self.assertEqual(self.client.get('/api/plus-jobs/missing').status_code, 404)
         page = self.client.get('/plus')
         self.assertEqual(page.status_code, 200)
-        self.assertIn('共用', page.text)
+        self.assertIn('class="sidebar"', page.text)
+        self.assertIn('data-tab="plus"', page.text)
+        self.assertIn('src="/plus-panel"', page.text)
+        panel = self.client.get('/plus-panel')
+        self.assertEqual(panel.status_code, 200)
+        self.assertIn('共用', panel.text)
         self.assertEqual(self.client.get('/static/plus_addressing.js').status_code, 200)
 
 

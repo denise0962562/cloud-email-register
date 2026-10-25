@@ -22,7 +22,7 @@ pip install -r requirements.txt
 # 2. 启动 Web UI
 python web_ui.py
 
-# 3. 打开 http://127.0.0.1:5050
+# 3. 打开 http://127.0.0.1:2224
 #    点击左下角「导入 Cookie」添加第一个账号
 #    支持粘贴 Cookie Editor 的 Header String 或 JSON
 ```
@@ -39,7 +39,7 @@ py -3 -m venv .venv
 .\restart.cmd
 ```
 
-默认监听 `http://127.0.0.1:5050`，参数可附在脚本后，例如 `.\start.cmd --port 8080`。窗口保持打开，关闭窗口会停止服务。重启脚本只停止本项目 Windows 虚拟环境中以绝对路径启动的 `web_ui.py`，不会按端口或 Python 进程名批量结束其他项目；旧的手动相对路径启动进程请先在其窗口按 Ctrl+C。重启时正在执行的任务可能中断，已确认成功记录及配置保留在 SQLite，自动任务按已保存设置恢复。macOS 的 `.venv` 不能复制到 Windows 使用，需重新创建 Windows 虚拟环境。
+默认监听 `http://127.0.0.1:2224`，参数可附在脚本后，例如 `.\start.cmd --port 8080`。窗口保持打开，关闭窗口会停止服务。重启脚本只停止本项目 Windows 虚拟环境中以绝对路径启动的 `web_ui.py`，不会按端口或 Python 进程名批量结束其他项目；旧的手动相对路径启动进程请先在其窗口按 Ctrl+C。重启时正在执行的任务可能中断，已确认成功记录及配置保留在 SQLite，自动任务按已保存设置恢复。macOS 的 `.venv` 不能复制到 Windows 使用，需重新创建 Windows 虚拟环境。
 
 ## 使用方式
 
@@ -148,7 +148,7 @@ python icloud_hme.py delete --email xxx@icloud.com --cookies cookies.json
 
 ## 一键创建与收件链接
 
-使用 `./start.sh` 启动后，打开 `http://127.0.0.1:5050`：
+使用 `./start.sh` 启动后，打开 `http://127.0.0.1:2224`：
 
 1. 在「批量创建」中选择账号和数量（每账号 1–20 个）。
 2. 点击「一键创建并配置收件」。后台自动创建 iCloud 隐藏地址、独立域名收件箱和仅匹配该别名的转发规则，并读回校验规则与收件凭据。
@@ -182,7 +182,7 @@ Cloudflare 页面只保存独立域名收件箱的读取凭据，不接收 Apple
 
 ## 自动注册页面
 
-打开 `http://127.0.0.1:5050/auto`，或点击管理面板的「自动注册」。该页面创建的是 iCloud 隐藏邮箱，并自动配置转发和专属收件链接。
+打开 `http://127.0.0.1:2224/auto`，或点击管理面板的「自动注册」。该页面创建的是 iCloud 隐藏邮箱，并自动配置转发和专属收件链接。
 
 账号元数据和 Cookie 分别存放在 SQLite 的 `accounts`、`account_sessions` 表，登录态按账号 ID 独立存储，并通过外键关联；旧版 JSON 和独立会话文件只导入一次，之后不再写入。每个客户端有独立的 Cookie 副本和 HTTP 会话，Apple 成功响应中的 Cookie 更新只保存回所属账号，已替换会话不会被旧客户端覆盖。调度器直接读取各账号会话，无需浏览器切号；某账号失败后仍继续处理其他账号。Apple 已失效或撤销的会话无法靠本地保存恢复，需对该账号重新登录一次。多个账号建议使用独立浏览器个人资料保持登录。
 
@@ -226,6 +226,31 @@ flask>=3.0             # Web UI
 ## License
 
 MIT
+
+## Linux 服务器部署（导入本地数据，自动任务默认关闭）
+
+工作目录为 `/opt/fastaiapi-groups/cloud-email-register`，仓库为 `git@github.com:fastaiapi-groups/cloud-email-register.git`。在服务器上克隆后创建独立虚拟环境并安装 `requirements.txt`。不能直接上传 macOS 的 `.venv`。
+
+`deploy/cloud-email-register.service` 提供 systemd 模板，安装前将 `User`、`Group` 改为实际运行账号，并确认该账号能读写项目数据库及 `results/`、`logs/`。默认监听服务器 `127.0.0.1:2224`，通过 SSH 隧道访问管理面板。
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+# 安装前确认服务模板的账号、目录与实际环境一致
+sudo cp deploy/cloud-email-register.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now cloud-email-register
+systemctl status cloud-email-register --no-pager
+```
+
+数据通过 SSH 单独传输，不提交 Git。运行中的本地 SQLite 使用下文在线备份方法导出一致快照；不要只复制主文件而遗漏 WAL。目标已有部署时先停止目标服务并备份目标数据库，再导入本地快照。`results/` 内的运行配置和历史导出按需同步，不能覆盖目标已有数据而不留备份。
+
+服务模板使用 `--disable-automation`，每次进程启动均会先持久化关闭自动注册、自动分裂和 FastAI 自动同步，并取消下次执行时间，再启动调度线程；同时不启动周期账号检查。复制来的数据即使保存了开启状态，也不会自动执行。历史记录、账号与收件链接保留，手动操作仍可使用；用户显式开启的自动任务仅在当次进程中运行，重启后再次关闭。该参数不能与 `--scheduler` 同时使用。
+
+```bash
+# 不使用 systemd 时的等价启动命令
+.venv/bin/python web_ui.py --host 127.0.0.1 --port 2224 --no-sync --disable-automation
+```
 
 ## SQLite 存储与迁移
 
