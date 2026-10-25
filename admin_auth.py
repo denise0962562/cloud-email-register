@@ -4,12 +4,19 @@ import json
 import secrets
 import sqlite3
 import time
+import math
 from contextlib import contextmanager
 from pathlib import Path
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
 SCOPES = {'emails:read', 'inbox-links:read', 'mail:read'}
+
+
+class Throttled(ValueError):
+    def __init__(self, seconds):
+        self.retry_after = max(1, math.ceil(seconds))
+        super().__init__('请求过于频繁，请稍后重试')
 
 
 def digest(value):
@@ -35,6 +42,9 @@ class AuthStore:
                     created_at REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS login_failures(bucket TEXT NOT NULL, created_at REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS login_failures_bucket ON login_failures(bucket,created_at);
+                CREATE TABLE IF NOT EXISTS rate_limits(bucket TEXT PRIMARY KEY,
+                    resets_at REAL NOT NULL, count INTEGER NOT NULL);
+                CREATE INDEX IF NOT EXISTS rate_limits_expiry ON rate_limits(resets_at);
             ''')
 
     @contextmanager
@@ -67,21 +77,36 @@ class AuthStore:
         if not isinstance(username, str) or not isinstance(password, str) or len(username)>64 or len(password)>256:
             return None
         now, bucket = self.clock(), digest(username + '\0' + peer)
+        account_bucket = 'account:' + digest(username)
         with self.connect() as db:
             # Serialize failed-attempt checks across worker threads.
             db.execute('BEGIN IMMEDIATE')
             db.execute('DELETE FROM login_failures WHERE created_at < ?', (now-900,))
-            if db.execute('SELECT count(*) FROM login_failures WHERE bucket=?', (bucket,)).fetchone()[0] >= 8:
-                raise ValueError('尝试次数过多，请 15 分钟后重试')
+            for key,maximum in [(bucket,8),(account_bucket,12)]:
+                failures=db.execute('SELECT count(*),min(created_at) FROM login_failures WHERE bucket=?', (key,)).fetchone()
+                if failures[0]>=maximum:raise Throttled(failures[1]+900-now)
             admin = db.execute('SELECT * FROM admin WHERE id=1').fetchone()
             if not admin or not secrets.compare_digest(username.encode(), admin['username'].encode()) or not check_password_hash(admin['password_hash'], password):
                 db.execute('INSERT INTO login_failures VALUES (?,?)', (bucket,now))
+                db.execute('INSERT INTO login_failures VALUES (?,?)', (account_bucket,now))
                 return None
             db.execute('DELETE FROM login_failures WHERE bucket=?', (bucket,))
+            db.execute('DELETE FROM login_failures WHERE bucket=?', (account_bucket,))
             db.execute('DELETE FROM sessions WHERE expires_at<=?', (now,))
             token, csrf, expires = secrets.token_urlsafe(32), secrets.token_urlsafe(32), now+days*86400
             db.execute('INSERT INTO sessions VALUES (?,?,?)', (digest(token),csrf,expires))
         return token, {'username': username, 'csrf_token': csrf, 'expires_at': expires}
+
+    def limit(self, bucket, maximum, seconds=60):
+        """Atomic persistent fixed windows shared by processes and server restarts."""
+        now=self.clock()
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('DELETE FROM rate_limits WHERE resets_at<=?', (now,))
+            row=db.execute('SELECT resets_at,count FROM rate_limits WHERE bucket=?',(bucket,)).fetchone()
+            if row and row['count']>=maximum:raise Throttled(row['resets_at']-now)
+            db.execute('INSERT INTO rate_limits VALUES (?,?,1) ON CONFLICT(bucket) DO UPDATE SET count=count+1',
+                       (bucket,now+seconds))
 
     def session(self, token):
         if not token or len(token)>256:

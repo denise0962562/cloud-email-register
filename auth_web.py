@@ -1,9 +1,10 @@
 """Deny by default: administrator cookies for management, keys for public APIs."""
 import os
 import secrets
+import ipaddress
 from pathlib import Path
 from flask import request, jsonify, redirect, g
-from admin_auth import AuthStore
+from admin_auth import AuthStore, Throttled, digest
 
 COOKIE = 'hme_admin_session'
 PUBLIC = {'/api/public/emails':'emails:read',
@@ -11,17 +12,38 @@ PUBLIC = {'/api/public/emails':'emails:read',
           '/api/public/mail':'mail:read'}
 
 
+def client_ip(trusted_proxies):
+    peer=request.remote_addr or 'unknown'
+    if peer in trusted_proxies:
+        # Only the immediate trusted proxy may supply this header. The final
+        # address is the client seen by Caddy, not an attacker-controlled prefix.
+        forwarded=request.headers.get('X-Forwarded-For','').split(',')[-1].strip()
+        try:return str(ipaddress.ip_address(forwarded))
+        except ValueError:pass
+    return peer
+
+
 def install_auth(app, root):
     app.extensions['admin_auth'] = AuthStore(Path(root)/'admin_auth.sqlite3')
     app.config.setdefault('ADMIN_SESSION_DAYS', int(os.environ.get('ADMIN_SESSION_DAYS', '30')))
     app.config.setdefault('AUTH_COOKIE_SECURE', os.environ.get('AUTH_COOKIE_SECURE','1') != '0')
+    app.config.setdefault('AUTH_TRUSTED_PROXIES',set(os.environ.get('AUTH_TRUSTED_PROXIES','127.0.0.1,::1').split(',')))
     if not 1<=app.config['ADMIN_SESSION_DAYS']<=365:
         raise ValueError('ADMIN_SESSION_DAYS 必须为 1–365')
 
     def store():return app.extensions['admin_auth']
 
+    @app.errorhandler(Throttled)
+    def throttled(error):
+        response=jsonify(error=str(error),retry_after=error.retry_after)
+        response.status_code=429
+        response.headers['Retry-After']=str(error.retry_after)
+        return response
+
     @app.before_request
     def authorize():
+        peer=client_ip(app.config['AUTH_TRUSTED_PROXIES'])
+        g.auth_peer=peer
         # Only code assets, the login screen and minimal liveness are anonymous.
         if (request.endpoint == 'static' and not request.path.endswith('.html')) or request.path in ['/login','/api/auth/login','/healthz']:
             if request.path == '/api/auth/login' and request.method == 'POST':
@@ -32,8 +54,10 @@ def install_auth(app, root):
                     parsed = urlsplit(origin)
                     if parsed.scheme!='https' or parsed.netloc!=request.host:
                         return jsonify(error='不允许跨站登录'),403
+                store().limit('login-ip:'+digest(peer),10)
             return
         if request.path.startswith('/api/public/'):
+            store().limit('public-ip:'+digest(peer),120)
             scope = PUBLIC.get(request.path)
             if not scope or request.method!='GET':return jsonify(error='公开 API 不存在'),404
             header = request.headers.get('Authorization','')
@@ -41,7 +65,10 @@ def install_auth(app, root):
             scopes = store().key_scopes(token)
             if scopes is None:return jsonify(error='需要有效的 API Key'),401
             if scope not in scopes:return jsonify(error='API Key 缺少此接口权限'),403
+            store().limit('public-key:'+digest(token),60)
+            if scope=='mail:read':store().limit('mail-key:'+digest(token),10)
             return
+        store().limit('admin-ip:'+digest(peer),300)
         token = request.cookies.get(COOKIE,'')
         g.admin_session = store().session(token)
         if not g.admin_session:
@@ -54,6 +81,7 @@ def install_auth(app, root):
             supplied = request.headers.get('X-CSRF-Token','')
             if not secrets.compare_digest(supplied.encode(), g.admin_session['csrf_token'].encode()):
                 return jsonify(error='会话请求校验失败，请刷新后重试'),403
+            store().limit('admin-write:'+digest(token),60)
 
     @app.after_request
     def protect_response(response):
@@ -88,8 +116,7 @@ def install_auth(app, root):
     def admin_login():
         data=request.get_json(silent=True) or {}
         if not isinstance(data,dict):return jsonify(error='登录参数无效'),400
-        try:result=store().login(data.get('username',''),data.get('password',''),request.remote_addr or '',app.config['ADMIN_SESSION_DAYS'])
-        except ValueError as error:return jsonify(error=str(error)),429
+        result=store().login(data.get('username',''),data.get('password',''),g.auth_peer,app.config['ADMIN_SESSION_DAYS'])
         if not result:return jsonify(error='用户名或密码不正确'),401
         token,metadata=result
         old=request.cookies.get(COOKIE)
@@ -109,6 +136,7 @@ def install_auth(app, root):
 
     @app.post('/api/auth/password')
     def admin_password():
+        store().limit('password-ip:'+digest(g.auth_peer),8,900)
         data=request.get_json(silent=True) or {}
         if not isinstance(data,dict):return jsonify(error='参数无效'),400
         try:store().change_password(data.get('old_password'),data.get('new_password'))

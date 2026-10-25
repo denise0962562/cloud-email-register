@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import web_ui
-from admin_auth import AuthStore
+from admin_auth import AuthStore, Throttled
 from auth_web import COOKIE
 
 
@@ -115,3 +115,55 @@ class AdminAuthTest(unittest.TestCase):
             response=caller.get('/api/public/mail?email=owner@icloud.com&alias=example@icloud.com',headers=header)
             self.assertEqual(response.status_code,200)
             self.assertEqual(response.json['count'],1)
+
+    def test_limits_persist_across_instances_and_return_retry_after(self):
+        self.store.limit('sample',2)
+        self.store.limit('sample',2)
+        reopened=AuthStore(self.store.path,clock=lambda:self.now)
+        with self.assertRaises(Throttled) as failure:reopened.limit('sample',2)
+        self.assertEqual(failure.exception.retry_after,60)
+        self.now+=60;reopened.limit('sample',2)
+
+    def test_untrusted_forwarded_headers_cannot_evade_login_ip_limit(self):
+        for number in range(10):
+            r=self.client.post('/api/auth/login',json={'username':'nonexistent-'+str(number),'password':'wrong'},
+                               headers={'X-Forwarded-For':'198.51.100.'+str(number)},
+                               environ_overrides={'REMOTE_ADDR':'203.0.113.9'})
+            self.assertEqual(r.status_code,401)
+        r=self.client.post('/api/auth/login',json={'username':'other','password':'wrong'},
+                           headers={'X-Forwarded-For':'192.0.2.99'},environ_overrides={'REMOTE_ADDR':'203.0.113.9'})
+        self.assertEqual(r.status_code,429)
+        self.assertEqual(r.headers['Retry-After'],'60')
+
+    def test_trusted_proxy_clients_have_separate_limits(self):
+        with patch.dict(web_ui.app.config,{'AUTH_TRUSTED_PROXIES':{'45.78.71.86'}}):
+            for number in range(10):
+                self.client.post('/api/auth/login',json={'username':'wrong-'+str(number),'password':'wrong'},
+                                 headers={'X-Forwarded-For':'198.51.100.1'},environ_overrides={'REMOTE_ADDR':'45.78.71.86'})
+            r=self.client.post('/api/auth/login',json={'username':'another','password':'wrong'},
+                               headers={'X-Forwarded-For':'198.51.100.2'},environ_overrides={'REMOTE_ADDR':'45.78.71.86'})
+            self.assertEqual(r.status_code,401)
+
+    def test_account_lockout_covers_distributed_password_attempts(self):
+        for number in range(12):
+            r=self.client.post('/api/auth/login',json={'username':'admin','password':'wrong'},
+                               environ_overrides={'REMOTE_ADDR':'198.51.100.'+str(number)})
+            self.assertEqual(r.status_code,401)
+        r=self.client.post('/api/auth/login',json={'username':'admin','password':'initial-password-123'},
+                           environ_overrides={'REMOTE_ADDR':'203.0.113.1'})
+        self.assertEqual(r.status_code,429)
+        self.assertEqual(r.headers['Retry-After'],'900')
+
+    def test_public_api_limits_invalid_keys_and_valid_key_traffic(self):
+        for _ in range(120):
+            self.assertEqual(self.client.get('/api/public/emails',headers={'X-API-Key':'invalid'}).status_code,401)
+        r=self.client.get('/api/public/emails',headers={'X-API-Key':'different-invalid'})
+        self.assertEqual(r.status_code,429)
+        self.assertIn('Retry-After',r.headers)
+        self.now+=61
+        _,token=self.store.create_key('reader',['emails:read'])
+        with patch.object(web_ui,'email_storage') as storage,patch.object(web_ui,'load_links',return_value={}),patch.object(web_ui._fastai_sync,'records',return_value={}):
+            storage.return_value.emails.return_value=[]
+            for _ in range(60):
+                self.assertEqual(self.client.get('/api/public/emails',headers={'X-API-Key':token}).status_code,200)
+            self.assertEqual(self.client.get('/api/public/emails',headers={'X-API-Key':token}).status_code,429)
