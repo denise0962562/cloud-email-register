@@ -44,6 +44,7 @@ class Storage:
                 CREATE TABLE IF NOT EXISTS email_records(seq INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL,
                     account_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', raw TEXT NOT NULL DEFAULT '');
                 CREATE INDEX IF NOT EXISTS email_records_account ON email_records(account_id);
+                CREATE INDEX IF NOT EXISTS email_records_address ON email_records(lower(email),seq);
                 CREATE TABLE IF NOT EXISTS documents(kind TEXT NOT NULL, key TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)),
                     PRIMARY KEY(kind,key));
                 CREATE TABLE IF NOT EXISTS tasks(job_id TEXT PRIMARY KEY, data TEXT NOT NULL CHECK(json_valid(data)));

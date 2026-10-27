@@ -1,0 +1,3 @@
+#emailKeyword{min-width:220px;padding:8px 12px;border:1px solid var(--rule-strong);background:var(--paper);color:var(--ink);font:inherit;font-size:13px}#emailSelectedCount,#emailPageInfo{font-size:12px;white-space:nowrap}#emailBulkStatus{font-size:12px;max-height:180px;overflow:auto}#aliasTableContainer{overflow-x:auto}.email-table input[type=checkbox]{width:16px;height:16px;cursor:pointer}.filter-bar button{white-space:nowrap}
+
+#emailBulkStatus:empty{display:none}
