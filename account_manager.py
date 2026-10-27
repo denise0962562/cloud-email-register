@@ -451,6 +451,8 @@ class AccountManager:
             for i in range(count):
                 email = None
                 try:
+                    # A paid alias must not be reserved when it cannot be routed.
+                    provisioner.check_rule_capacity()
                     alias_label = label or f"{account.get('name', acc_id)} {datetime.now().strftime('%m%d%H%M')}-{i + 1}"
                     result = client.create_alias(label=alias_label, max_retries=1)
                     email = result.get("email", "")

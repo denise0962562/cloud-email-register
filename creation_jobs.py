@@ -86,7 +86,8 @@ class CreationJobs:
                 for ordinal, target in enumerate(targets):
                     if cancel.is_set(): break
                     with self._lock:
-                        self._jobs[job_id]["progress"] = f"{self.target_label} {index + 1}/{len(account_ids)}，邮箱 {ordinal + 1}/{len(targets)}：创建并配置收件"
+                        action = "补齐收件地址" if repair is not None else "创建并配置收件"
+                        self._jobs[job_id]["progress"] = f"{self.target_label} {index + 1}/{len(account_ids)}，邮箱 {ordinal + 1}/{len(targets)}：{action}"
                         self._persist(job_id)
                     try:
                         if repair is not None:
@@ -95,6 +96,8 @@ class CreationJobs:
                             result = self.create_item(account_id, label)
                     except Exception as error:
                         result = {"ok": False, "account_id": account_id, "error": str(error)[:250]}
+                        if repair is not None:
+                            result["email"] = target
                     self._append(job_id, account_id, result)
                     if not result.get("ok") and repair is None:
                         break

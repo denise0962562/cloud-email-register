@@ -39,6 +39,29 @@ class WebWorkflowTest(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
             start.assert_not_called()
 
+    def test_one_click_repair_scopes_deduplicates_and_skips_ready_links(self):
+        from unittest.mock import Mock
+        rows = [{"email": e, "account_id": a} for e, a in [
+            ("pending@icloud.com", "a1"), ("pending@icloud.com", "a1"),
+            ("ready@icloud.com", "a1"), ("base+tag@icloud.com", "a1"), ("other@icloud.com", "a2")]]
+        with patch.object(web_ui._account_mgr, "get_account", return_value={"status": "error"}), \
+             patch.object(web_ui, "email_storage", return_value=Mock(emails=lambda: rows)), \
+             patch.object(web_ui, "load_links", return_value={"ready@icloud.com": {"configured": True, "inbox_url": "https://example.com"}}), \
+             patch.object(web_ui._creation_jobs, "start", return_value="repair-job") as start:
+            response = self.client.post("/api/inbox-links/repair", json={"account_id": "a1", "address_type": "source"})
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(response.json["pending"], 1)
+            self.assertEqual(start.call_args.kwargs["repair"], {"a1": ["pending@icloud.com"]})
+
+    def test_empty_repair_does_not_start_job(self):
+        from unittest.mock import Mock
+        with patch.object(web_ui._account_mgr, "get_account", return_value={"status": "active"}), \
+             patch.object(web_ui, "email_storage", return_value=Mock(emails=lambda: [])), \
+             patch.object(web_ui._creation_jobs, "start") as start:
+            response = self.client.post("/api/inbox-links/repair", json={"account_id": "a1"})
+            self.assertEqual(response.json["pending"], 0)
+            start.assert_not_called()
+
     def test_job_start_returns_id_for_polling_instead_of_blocking(self):
         with patch.object(web_ui._account_mgr, "get_account", return_value={"status": "active"}), \
                 patch.object(web_ui._creation_jobs, "start", return_value="test-job") as start:

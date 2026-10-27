@@ -55,6 +55,41 @@ class FakeDomain:
 
 
 class ProvisioningTest(unittest.TestCase):
+    def test_capacity_stops_before_reserving_alias(self):
+        import account_manager as module
+        manager = module.AccountManager()
+        manager.accounts = {"a1": {"name": "test"}}
+        client = Mock()
+        manager.get_client = Mock(return_value=client)
+        with patch("mail_provisioning.MailProvisioner") as factory:
+            factory.return_value.check_rule_capacity.side_effect = RuntimeError("500 条上限")
+            result = manager.create_aliases_for_account("a1")
+        client.create_alias.assert_not_called()
+        self.assertFalse(result[0]["alias_created"])
+
+    def test_capacity_blocks_inbox_creation_but_allows_existing_rule_repair(self):
+        with tempfile.TemporaryDirectory() as folder:
+            apple, domain = FakeApple(), FakeDomain()
+            apple.rules = [{"ruleId": str(i), "prefix": "TO", "body": f"{i}@icloud.com",
+                            "action": "FRWD", "target": domain.address} for i in range(500)]
+            provisioner = MailProvisioner(apple, Path(folder) / 'links.json', domain, publisher=lambda r: r)
+            provisioner.prepare()
+            with self.assertRaisesRegex(RuntimeError, "500 条上限"):
+                provisioner.provision("new@icloud.com", "a1")
+            self.assertEqual(domain.creates, 0)
+            self.assertEqual(provisioner.ensure_rule("1@icloud.com", domain.address), "1")
+
+    def test_http_success_with_rule_limit_error_is_not_reported_as_success(self):
+        apple = FakeApple()
+        original = apple._request
+        apple._request = lambda method, url, **kw: ({"requestStatus": "FAILURE", "data": [
+            {"status": "FAILURE", "data": {"errorCode": "RULE_MAXIMUM_REACHED"}}]}
+            if method == "POST" else original(method, url, **kw))
+        provisioner = MailProvisioner(apple, publisher=lambda r: r)
+        provisioner.prepare()
+        with self.assertRaisesRegex(RuntimeError, "500 条上限"):
+            provisioner.ensure_rule("new@icloud.com", "dest@fastaiapi.cloud")
+
     def test_new_account_sets_forward_target_after_first_alias_exists(self):
         apple = FakeApple()
         original = apple._request

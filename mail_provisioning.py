@@ -11,6 +11,7 @@ from public_inbox import publish_inbox_link, load_config
 API_BASE = "https://api.fastaiapi.cloud"
 WEBMAIL_BASE = "https://webmail.fastaiapi.cloud/"
 MAIL_DOMAIN = "fastaiapi.cloud"
+MAX_MAIL_RULES = 500
 
 
 class MailProvisioner:
@@ -66,6 +67,14 @@ class MailProvisioner:
             raise RuntimeError("读取 iCloud 转发规则失败")
         return data["mailRules"]
 
+    def check_rule_capacity(self, alias=None, destination=None):
+        rules = self.list_rules()
+        # Existing forwarding can still be repaired/published at the limit.
+        if alias and any(self.matching_rule(r, alias, destination or "") for r in rules):
+            return
+        if len(rules) >= MAX_MAIL_RULES:
+            raise RuntimeError("iCloud 转发规则已达 500 条上限；请先释放规则容量，再一键补齐收件地址；未删除已有规则")
+
     def _domain_request(self, method, path, *, token=None, data=None):
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         try:
@@ -92,17 +101,25 @@ class MailProvisioner:
         # Do not silently override a user's existing rule for the same recipient.
         if any(r.get("prefix") in ("TO", "RECP") and r.get("body", "").lower() == alias.lower() for r in rules):
             raise RuntimeError("该别名已有不同的收件规则，请先检查冲突；未覆盖原规则")
+        self.check_rule_capacity(alias, destination)
         rule = {"ruleName": f"HME {alias}"[:30], "prefix": "TO", "body": alias,
                 "action": "FRWD", "target": destination,
                 "ruleSequence": max((int(r.get("ruleSequence", 0)) for r in rules), default=0) + 10000}
         try:
-            self.client._request("POST", self.rules_url.rstrip('/') + "/batch",
+            response = self.client._request("POST", self.rules_url.rstrip('/') + "/batch",
                                  json_data={"data": [{"operation": "CREATE", "data": rule}]}, max_attempts=1)
+            operations = response.get("data", [])
+            if any(item.get("data", {}).get("errorCode") == "RULE_MAXIMUM_REACHED" for item in operations):
+                raise RuntimeError("iCloud 转发规则已达 500 条上限；请释放容量后补齐")
+            if response.get("requestStatus") == "FAILURE" or any(item.get("status") == "FAILURE" for item in operations):
+                raise RuntimeError("iCloud 拒绝创建转发规则，已保存进度供补齐")
         except Exception as error:
             # A timed-out POST may have succeeded; read back before retrying it.
             confirmed = next((r for r in self.list_rules() if self.matching_rule(r, alias, destination)), None)
             if confirmed:
                 return confirmed["ruleId"]
+            if isinstance(error, RuntimeError) and str(error).startswith("iCloud "):
+                raise
             status = re.search(r"HTTP \d{3}", str(error))
             detail = f"（{status.group(0)}）" if status else ""
             raise RuntimeError(f"转发规则创建失败{detail}，已保存邮箱；可补全配置而无需重新创建别名") from None
@@ -121,6 +138,7 @@ class MailProvisioner:
             return self.publisher(record)
         try:
             self.ensure_forward_target()
+            self.check_rule_capacity(alias, record.get("destination"))
             if not record.get("inbox_url"):
                 update_link(alias, {"stage": "creating_inbox"}, self.registry)
                 created = self._domain_request("POST", "/api/new_address", data={
