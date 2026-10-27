@@ -332,3 +332,11 @@ Storage().backup("backup/icloud_hme_snapshot.sqlite3")  # 目标文件需尚不�
 自动同步与手动同步共用一个任务队列，重复点击会查看正在执行的任务。服务重启保留成功标记，将未完成的任务标记中断，可安全重试；不会为了重试而创建新邮箱。导入只传邮箱与收件链接，不发送 Apple Cookie。此操作是导入邮箱号池，未调用目标项目的注册接口。
 
 API：`GET/POST /api/fastai-sync` 读取状态或保存 `{api_url,enabled,interval_minutes,batch_size,include_synced}`；`POST /api/fastai-sync/run` 按配置数量执行一轮（传 `{all:true}` 同步全部，或传 `{emails:[...]}` 指定子集）；`GET /api/fastai-sync/jobs/{id}` 查看任务进度。
+
+## iCloud 会话保活与 Cookie 更新
+
+生产启动可使用 `--disable-automation --session-keepalive`：注册、分裂、同步仍默认关闭，会话维护独立运行。保活启动后立即检查，之后每 5 分钟调用 Apple 会话校验，保存 Apple 返回的新 Cookie，不创建邮箱、不发送邮件。网络错误按 5、10、20、40、60 分钟退避重试；HTTP 401/403/421/450 标记需要重新登录并暂停自动尝试，避免反复使用已失效凭据。
+
+这是会话保活和 Cookie 轮换保存，不能保证永久有效，也不能用已失效的 Cookie 绕过 Apple 登录和双重认证。浏览器登录时选择“保持登录”，导出后不要退出 iCloud。Apple 要求重新认证时，从账号卡片点击“更新 Cookie”，导入新登录的 Header String 或 JSON 即可；服务会验证账号身份，原位更新对应账号，不需要重启。邮箱、收件链接、其他账号和业务调度配置不会被该操作覆盖。
+
+管理员接口 `POST /api/accounts/{id}/cookies` 接受 `{"cookie_input":"name=value; ..."}`，必须携带管理员会话及 CSRF Token；公开 API Key 无权更新 Cookie。返回结果不包含凭据，身份不匹配或新会话校验失败时保留原 Cookie。账号接口提供 `session_requires_login`、`session_checked_at` 及 `last_error` 供查看保活状态。

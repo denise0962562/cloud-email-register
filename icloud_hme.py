@@ -218,6 +218,10 @@ def _decrypt_chrome_value(encrypted_value: bytes, key: bytes) -> Optional[str]:
 # iCloud HME API 客户端
 # ============================================================
 
+class ICloudSessionExpired(RuntimeError):
+    """Apple 已拒绝会话；保活不能替代重新登录及双重认证。"""
+
+
 class ICloudHME:
     """iCloud Hide My Email 客户端"""
 
@@ -228,7 +232,8 @@ class ICloudHME:
         self.host = self._normalize_host(host)
         self.verbose = verbose
         self.session = requests.Session()
-        self.session.cookies.update(cookies)
+        for name, value in cookies.items():
+            self.session.cookies.set(name, value, domain='.' + self.host, path='/')
         self._setup_url: Optional[str] = None
         self._service_url: Optional[str] = None
         self._account_info: Optional[Dict] = None
@@ -286,18 +291,25 @@ class ICloudHME:
         for attempt in range(1, max_attempts + 1):
             try:
                 resp = self.session.request(method, full_url, headers=headers, data=body, timeout=timeout)
+                # 轮换后移除同名旧值，避免同时发送导入值和 Apple 返回的新值。
+                updates = {cookie.name: cookie.value for cookie in resp.cookies}
+                for name, value in updates.items():
+                    for cookie in list(self.session.cookies):
+                        if cookie.name == name:
+                            self.session.cookies.clear(cookie.domain, cookie.path, cookie.name)
+                    self.session.cookies.set(name, value, domain='.' + self.host, path='/')
+                self.cookies.update(updates)
+                if updates and self.on_cookie_update:
+                    self.on_cookie_update(updates)
                 if not resp.ok:
+                    if resp.status_code in (401, 403, 421, 450):
+                        raise ICloudSessionExpired(f'HTTP {resp.status_code}: Apple 会话已失效，请重新登录 iCloud 并更新 Cookie')
                     last_err = RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
-                    if resp.status_code in (401, 403):
-                        raise last_err
                     if attempt < max_attempts:
                         time.sleep(RETRY_DELAYS[min(attempt - 1, len(RETRY_DELAYS) - 1)])
                         continue
                     raise last_err
                 text = resp.text
-                updates = {cookie.name: cookie.value for cookie in resp.cookies}
-                if updates and self.on_cookie_update:
-                    self.on_cookie_update(updates)
                 return resp.json() if text else {}
             except requests.exceptions.Timeout:
                 last_err = RuntimeError(f"超时 ({timeout}s)")

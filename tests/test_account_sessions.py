@@ -3,12 +3,53 @@ import tempfile
 import unittest
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 import account_manager as module
 from creation_jobs import CreationJobs
 
 
 class AccountSessionsTest(unittest.TestCase):
+    def test_session_replacement_checks_identity_and_preserves_other_account(self):
+        manager = module.AccountManager()
+        with patch('icloud_hme.ICloudHME') as factory:
+            client = factory.return_value
+            client.cookies = {'token': 'rotated'}
+            client.get_account_info.return_value = {'appleId': 'wrong@example.com'}
+            with self.assertRaises(ValueError):
+                manager.replace_session('acc_a', 'token=new')
+            self.assertEqual(manager.accounts['acc_a']['cookies'], {'token': 'A'})
+            client.get_account_info.return_value = {'appleId': 'a@example.com'}
+            manager.replace_session('acc_a', 'token=new')
+        reloaded = module.AccountManager()
+        self.assertEqual(reloaded.accounts['acc_a']['cookies'], {'token': 'rotated'})
+        self.assertEqual(reloaded.accounts['acc_b'], self.records['acc_b'])
+        self.assertFalse(reloaded.accounts['acc_a']['session_requires_login'])
+
+    def test_keepalive_marks_relogin_without_replaying_expired_cookie(self):
+        from icloud_hme import ICloudSessionExpired
+        manager = module.AccountManager()
+        client = Mock(cookies={'token': 'A'})
+        client.validate_session.side_effect = ICloudSessionExpired('HTTP 421')
+        with patch.object(manager, 'get_client', return_value=client):
+            result = manager.keep_session_alive('acc_a')
+        self.assertTrue(result['session_requires_login'])
+        self.assertEqual(result['status'], 'error')
+        client.validate_session.assert_called_once_with(max_attempts=1)
+        self.assertEqual(module.AccountManager().accounts['acc_a']['cookies'], {'token': 'A'})
+
+    def test_old_keepalive_cannot_mark_new_cookie_as_expired(self):
+        from icloud_hme import ICloudSessionExpired
+        manager = module.AccountManager()
+        client = Mock(cookies={'token': 'A'})
+        def replace_while_waiting(**kwargs):
+            manager.update_account('acc_a', cookies={'token': 'new'}, status='active')
+            raise ICloudSessionExpired('HTTP 421')
+        client.validate_session.side_effect = replace_while_waiting
+        with patch.object(manager, 'get_client', return_value=client):
+            result = manager.keep_session_alive('acc_a')
+        self.assertEqual(result['status'], 'active')
+        self.assertEqual(result['cookies'], {'token': 'new'})
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -23,6 +23,24 @@ class AdminAuthTest(unittest.TestCase):
         self.assertEqual(response.status_code,200)
         return response.json['csrf_token'],response
 
+    def test_cookie_refresh_requires_csrf_and_never_returns_cookie(self):
+        csrf, _ = self.login()
+        path = '/api/accounts/a/cookies'
+        with patch.object(web_ui._account_mgr, 'replace_session', return_value={
+                'real_email': 'a@example.com', 'status': 'active', 'cookies': {'token': 'private'}}) as replace:
+            self.assertEqual(self.client.post(path, json={'cookie_input': 'token=private'}).status_code, 403)
+            replace.assert_not_called()
+            response = self.client.post(path, json={'cookie_input': 'token=private'},
+                                        headers={'X-CSRF-Token': csrf})
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn('private', response.text)
+            self.assertNotIn('cookies', response.json)
+            replace.side_effect = RuntimeError('private-session-response')
+            response = self.client.post(path, json={'cookie_input': 'token=private'},
+                                        headers={'X-CSRF-Token': csrf})
+            self.assertEqual(response.status_code, 400)
+            self.assertNotIn('private-session-response', response.text)
+
     def test_all_existing_management_routes_fail_closed(self):
         # Covers new routes as they are added; only public/auth bootstrap are exempt.
         for rule in web_ui.app.url_map.iter_rules():

@@ -14,6 +14,20 @@ from storage import Storage
 
 
 class DeploymentStartupTest(unittest.TestCase):
+    def test_keepalive_can_run_without_enabling_business_automation(self):
+        auto, split, sync = Mock(), Mock(), Mock()
+        manager = Mock()
+        manager.list_accounts.return_value = []
+        with patch.multiple(web_ui, _auto_registration=auto, _auto_plus=split,
+                            _fastai_sync=sync, _account_mgr=manager), \
+                patch('threading.Thread') as thread, patch('signal.signal'), \
+                patch.dict(sys.modules, {'waitress': SimpleNamespace(serve=Mock())}), \
+                patch.object(sys, 'argv', ['web_ui.py', '--disable-automation', '--no-sync', '--session-keepalive']):
+            web_ui.main()
+        thread.assert_called_once_with(target=web_ui._health_loop, daemon=True)
+        for automation in (auto, split, sync):
+            automation.configure.assert_called_once_with({'enabled': False})
+
     def test_imported_enabled_overdue_schedules_disabled_before_first_tick(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

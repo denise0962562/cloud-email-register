@@ -192,6 +192,10 @@ class AccountManager:
         return primary or apple_id
 
     def validate_account(self, acc_id: str) -> Dict:
+        with self._workflow_lock(acc_id):
+            return self._validate_account_locked(acc_id)
+
+    def _validate_account_locked(self, acc_id: str) -> Dict:
         from icloud_hme import ICloudHME
 
         account = self.accounts.get(acc_id)
@@ -224,12 +228,60 @@ class AccountManager:
             account["status"] = "active"
             account["last_validated"] = datetime.now().isoformat()
             account["last_error"] = None
+            account["session_requires_login"] = False
         except Exception as e:
+            from icloud_hme import ICloudSessionExpired
             account["status"] = "error"
             account["last_error"] = str(e)[:300]
+            account["session_requires_login"] = isinstance(e, ICloudSessionExpired)
 
         self._save()
         return account
+
+    def keep_session_alive(self, acc_id: str) -> Dict:
+        """只校验会话并保存轮换 Cookie，不创建邮箱或启动业务任务。"""
+        from icloud_hme import ICloudSessionExpired
+        with self._workflow_lock(acc_id):
+            client = self.get_client(acc_id, verbose=False)
+            try:
+                client.validate_session(max_attempts=1)
+                info = client.get_account_info() or {}
+                account = self.accounts[acc_id]
+                if not info.get('appleId') or info['appleId'].lower() != account.get('real_email', '').lower():
+                    raise ICloudSessionExpired('Apple 会话身份不匹配，请更新该账号 Cookie')
+                values = dict(status='active', last_error=None, session_requires_login=False,
+                              session_checked_at=datetime.now().isoformat(),
+                              last_validated=datetime.now().isoformat())
+            except Exception as error:
+                # 不把远端响应正文或凭据写入账号接口与日志。
+                expired = isinstance(error, ICloudSessionExpired)
+                values = dict(status='error', session_requires_login=expired,
+                              session_checked_at=datetime.now().isoformat(),
+                              last_error='Apple 会话失效，请重新登录 iCloud 并更新 Cookie' if expired
+                              else '会话保活暂时失败，将自动重试')
+            with self._lock:
+                account = self.accounts.get(acc_id)
+                # 手工替换期间发出的旧请求不能回写新会话的状态。
+                if account and account.get('cookies') == client.cookies:
+                    account.update(values)
+                    self._save()
+                return dict(account or {})
+
+    def replace_session(self, acc_id: str, raw: str) -> Dict:
+        """校验新 Cookie 身份后原位替换，保留账号 ID、邮箱与任务配置。"""
+        from icloud_hme import ICloudHME
+        with self._workflow_lock(acc_id):
+            account = self.accounts.get(acc_id)
+            if not account:
+                raise KeyError('账号不存在')
+            client = ICloudHME(self.parse_cookie_input(raw), host=account.get('host', 'icloud.com'), verbose=False)
+            client.validate_session(max_attempts=1)
+            info = client.get_account_info() or {}
+            if not info.get('appleId') or info['appleId'].lower() != account.get('real_email', '').lower():
+                raise ValueError('Cookie 所属账号不匹配，未修改原账号')
+            return self.update_account(acc_id, cookies=client.cookies, status='active', last_error=None,
+                                       session_requires_login=False,
+                                       last_validated=datetime.now().isoformat())
 
     def validate_all(self) -> List[Dict]:
         results: List[Dict] = []
