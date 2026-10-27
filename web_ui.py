@@ -335,7 +335,8 @@ def api_replace_account_cookies(acc_id):
         return jsonify(ok=False, error='Cookie 文本为空或过长'), 400
     try:
         account = _account_mgr.replace_session(acc_id, data['cookie_input'])
-        return jsonify(ok=True, real_email=account['real_email'], status=account['status'])
+        return jsonify(ok=True, real_email=account['real_email'], status=account['status'],
+                       alias_total=account.get('alias_total', 0))
     except KeyError:
         return jsonify(ok=False, error='账号不存在'), 404
     except ValueError:
