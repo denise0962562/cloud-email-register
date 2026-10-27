@@ -41,12 +41,15 @@ class EmailDeleteJobs(CreationJobs):
                 return self._delete(row)
             except Exception as error:
                 message = str(error)[:250]
-                status = re.search(r'HTTP (401|403|421)\b',message)
-                if status: message = 'iCloud 会话不可用（HTTP '+status.group(1)+'），请更新所属账号 Cookie 后重试删除'
-                self.storage.update_link(target, {'deletion_error':message})
                 from icloud_hme import ICloudSessionExpired
-                return {'ok':False, 'email':target, 'error':message,
-                        'session_expired': isinstance(error, ICloudSessionExpired) or bool(status and status.group(1)=='421')}
+                status = re.search(r'HTTP (401|403|421|450)\b',message)
+                # 收件服务的鉴权错误不能误判为 Apple Cookie 失效。
+                expired = isinstance(error, ICloudSessionExpired) or bool(
+                    status and status.group(1)=='421' and '短链接' not in message and '收件箱' not in message)
+                if expired and status:
+                    message = 'iCloud 会话不可用（HTTP '+status.group(1)+'），请更新所属账号 Cookie 后重试删除'
+                self.storage.update_link(target, {'deletion_error':message})
+                return {'ok':False, 'email':target, 'error':message, 'session_expired':expired}
 
     def _delete(self, row):
         email, account = row['email'], row['account_id']

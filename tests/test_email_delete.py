@@ -125,6 +125,14 @@ class DeleteTests(unittest.TestCase):
         self.assertEqual(revoke.call_args.args[0]['public_secret'],'private-secret')
         self.assertTrue(self.store.read_document('email_deletion',self.child)['remote_cleanup_completed'])
 
+    def test_public_inbox_auth_failure_does_not_claim_apple_cookie_expired(self):
+        self.jobs.cleanup_inboxes=True
+        with patch('public_inbox.revoke_inbox_link',side_effect=RuntimeError('短链接撤销服务返回 HTTP 401')):
+            result=self.jobs.create_item(self.child,'')
+        self.assertFalse(result['session_expired'])
+        self.assertIn('短链接',result['error'])
+        self.assertIn(self.child,self.store.load_links())
+
 class StrictAppleListTest(unittest.TestCase):
     def test_error_payload_is_never_treated_as_empty_mailbox(self):
         from icloud_hme import ICloudHME
