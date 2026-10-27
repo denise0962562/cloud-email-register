@@ -12,6 +12,7 @@ class CreationJobs:
     document_kind = "creation_job"
     target_label = "账号"
     round_robin = False
+    record_skips = False
     def __init__(self, manager, on_result=None):
         self.manager = manager
         candidate = getattr(manager, "storage", None)
@@ -44,7 +45,7 @@ class CreationJobs:
             job_id = secrets.token_hex(12)
             self._jobs[job_id] = {"id": job_id, "status": "running", "results": {}, "events": [], "lines": [],
                                   "started_at": time.time(), "total": sum(map(len,repair.values())) if repair is not None else len(account_ids)*count,
-                                  "total_created": 0, "total_errors": 0, "progress": "准备账号配置"}
+                                  "total_created": 0, "total_errors": 0, "total_skipped": 0, "progress": "准备账号配置"}
             self._persist(job_id)
             self._active = job_id
             self._cancel_events[job_id] = threading.Event()
@@ -77,6 +78,8 @@ class CreationJobs:
             if result.get("ok"):
                 job["lines"].append(result["line"])
                 job["total_created"] += 1
+            elif result.get('skipped'):
+                job['total_skipped'] += 1
             else:
                 job["total_errors"] += 1
             self._persist(job_id)
@@ -94,16 +97,41 @@ class CreationJobs:
                 for ordinal, target in enumerate(targets):
                     yield index, account_id, ordinal, target, len(targets)
 
+    def group_key(self, target):
+        return target
+
+    def skip_reason(self, target):
+        return None
+
+    def stop_group(self, target, result):
+        return self.group_key(target) if not result.get('ok') else None
+
+    def skipped_result(self, target, reason):
+        return {'ok': False, 'skipped': True, 'account_id': self.group_key(target), 'error': reason}
+
     def _run(self, job_id, account_ids, count, label, interval, repair, item_interval=0):
         cancel = self._cancel_events[job_id]
         try:
-            failed, previous = set(), None
+            failed, previous = {}, None
             for index, account_id, ordinal, target, total in self._work_items(account_ids, count, repair):
-                if account_id in failed: continue
+                if cancel.is_set(): break
+                group = self.group_key(account_id)
+                reason = failed.get(group) or self.skip_reason(account_id)
+                if reason:
+                    failed[group] = reason
+                    if self.record_skips:
+                        self._append(job_id, account_id, self.skipped_result(account_id, reason))
+                    continue
                 if previous is not None:
                     gap = item_interval if self.round_robin or previous == account_id else interval
                     if gap: cancel.wait(gap)
                 if cancel.is_set(): break
+                reason = self.skip_reason(account_id)
+                if reason:
+                    failed[group] = reason
+                    if self.record_skips:
+                        self._append(job_id, account_id, self.skipped_result(account_id, reason))
+                    continue
                 with self._lock:
                     action = "补齐收件地址" if repair is not None else "创建并配置收件"
                     self._jobs[job_id]["progress"] = f"{self.target_label} {index + 1}/{len(account_ids)}，邮箱 {ordinal + 1}/{total}：{action}"
@@ -114,11 +142,16 @@ class CreationJobs:
                     else:
                         result = self.create_item(account_id, label)
                 except Exception as error:
+                    from icloud_hme import ICloudSessionExpired
                     message = str(error)[:250]
                     status = re.search(r"HTTP (401|403|421)\b", message)
                     if status:
                         message = f"iCloud 会话不可用（HTTP {status.group(1)}），请更新该账号 Cookie 后重新补齐"
-                    result = {"ok": False, "account_id": account_id, "error": message}
+                    if self.record_skips:
+                        from plus_addressing import safe_error
+                        message = safe_error(error)
+                    result = {"ok": False, "account_id": account_id, "error": message,
+                              'session_expired': isinstance(error, ICloudSessionExpired)}
                     if repair is not None:
                         result["email"] = target
                         from inbox_links import update_link
@@ -126,13 +159,15 @@ class CreationJobs:
                 self._append(job_id, account_id, result)
                 previous = account_id
                 if not result.get("ok") and repair is None:
-                    failed.add(account_id)
+                    blocked = self.stop_group(account_id, result)
+                    if blocked is not None:
+                        failed[blocked] = '账号 Cookie 已确认失效，跳过本轮剩余任务' if result.get('session_expired') else '本轮账号处理失败'
             with self._lock:
                 job = self._jobs[job_id]
                 job["status"] = "cancelled" if cancel.is_set() else "completed"
-                job["progress"] = f"已完成 {job['total_created']} 个，失败 {job['total_errors']} 个"
+                job["progress"] = f"已完成 {job['total_created']} 个，失败 {job['total_errors']} 个，跳过 {job['total_skipped']} 个"
                 job["output"] = "\n".join(job["lines"])
-                job["ok"] = job["total_errors"] == 0
+                job["ok"] = job["total_errors"] == 0 and job['total_skipped'] == 0
         except Exception as error:
             with self._lock:
                 self._jobs[job_id].update(status="failed", error=str(error)[:250], ok=False)

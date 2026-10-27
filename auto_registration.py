@@ -144,16 +144,17 @@ class AutoRegistration:
                     results = job.get("events", [row for rows in job["results"].values() for row in rows])
                     new = results[self.current["logged_results"]:]
                     for result in new:
-                        self.log("success" if result.get("ok") else "error",
+                        self.log("success" if result.get("ok") else 'warn' if result.get('skipped') else "error",
                                  (result.get("email", "") + " 创建及收件配置完成") if result.get("ok")
-                                 else "本账号停止本轮：" + str(result.get("error", "配置失败"))[:240])
+                                 else ('已跳过：' if result.get('skipped') else '单个邮箱失败：') + str(result.get("error", "配置失败"))[:240])
                     self.current.update(logged_results=len(results), lines=job.get("lines", []),
                                         total_created=job.get("total_created", 0), total_errors=job.get("total_errors", 0),
+                                        total_skipped=job.get('total_skipped', 0),
                                         progress=job.get("progress", ""))
                     if job["status"] != "running":
                         keep_deadline = self.current.get("trigger") == "manual" and not job.get("total_created", 0)
                         self.current.update(status=job["status"], finished_at=self.clock())
-                        self.log("info", f"本轮结束：成功 {job.get('total_created', 0)} 个，失败 {job.get('total_errors', 0)} 个")
+                        self.log("info", f"本轮结束：成功 {job.get('total_created', 0)} 个，失败 {job.get('total_errors', 0)} 个，跳过 {job.get('total_skipped', 0)} 个")
                         self.history.insert(0, self.current)
                         self.history = self.history[:40]
                         self.current = None

@@ -124,13 +124,13 @@ class AutoPlusTest(unittest.TestCase):
     def test_failed_publication_is_visible_and_resumes_same_address(self):
         with patch('plus_addressing.publish_inbox_link', side_effect=RuntimeError('HTTP 503 private-token')):
             failed = self.wait(self.jobs.start(['base@icloud.com'], 3, 'resume', item_interval=0))
-        self.assertEqual(failed['total_errors'], 1)
-        self.assertEqual(len(self.store.emails()), 1)
+        self.assertEqual(failed['total_errors'], 3)
+        self.assertEqual(len(self.store.emails()), 3)
         pending = self.store.emails()[0]['email']
         self.assertNotIn('private-token', str(failed))
         fixed = self.wait(self.jobs.start(['base@icloud.com'], 1, 'resume', item_interval=0))
         self.assertEqual(fixed['results']['base@icloud.com'][0]['email'], pending)
-        self.assertEqual(len(self.store.emails()), 1)
+        self.assertEqual(len(self.store.emails()), 3)
 
     def test_schedule_runs_after_deadline_and_persists_separately_from_registration(self):
         native = AutoRegistration(Mock(), self.manager, self.path, clock=lambda: self.now)
@@ -195,7 +195,7 @@ class AutoPlusTest(unittest.TestCase):
         self.assertEqual([source(row['email']) for row in self.store.emails()], expected)
         self.assertEqual([source(line.split('----')[0]) for line in result['lines']], expected)
 
-    def test_failed_source_stops_its_round_and_other_sources_continue_interleaved(self):
+    def test_ordinary_failure_does_not_stop_same_source_or_other_sources(self):
         self.add_source('second@icloud.com'); self.add_source('third@icloud.com')
         original = self.jobs.create_item
         calls = []
@@ -204,8 +204,53 @@ class AutoPlusTest(unittest.TestCase):
             return {'ok':False,'error':'test failure'} if base=='base@icloud.com' else original(base,label)
         with patch.object(self.jobs,'create_item',side_effect=create):
             result = self.wait(self.jobs.start(list(self.jobs.sources()),3,'errors',item_interval=0))
-        self.assertEqual(calls,['base@icloud.com']+['second@icloud.com','third@icloud.com']*3)
-        self.assertEqual((result['total_created'],result['total_errors']),(6,1))
+        self.assertEqual(calls,['base@icloud.com','second@icloud.com','third@icloud.com']*3)
+        self.assertEqual((result['total_created'],result['total_errors'],result['total_skipped']),(6,3,0))
+
+    def test_public_inbox_auth_error_is_not_mistaken_for_apple_cookie_revocation(self):
+        attempts = []
+        def publish(record):
+            attempts.append(record['email'])
+            if len(attempts) == 1:
+                raise RuntimeError('HTTP 403 private-token')
+            return self.publish(record)
+        with patch('plus_addressing.publish_inbox_link', side_effect=publish):
+            result = self.wait(self.jobs.start(['base@icloud.com'], 3, 'errors', item_interval=0))
+        self.assertEqual((result['total_created'],result['total_errors'],result['total_skipped']),(2,1,0))
+        self.assertEqual(len(set(attempts)), 3)
+        self.assertNotIn('Cookie', result['events'][0]['error'])
+        self.assertNotIn('private-token', str(result))
+
+    def test_confirmed_apple_session_failure_skips_all_sources_of_that_account_only(self):
+        from icloud_hme import ICloudSessionExpired
+        self.add_source('second@icloud.com'); self.add_source('other@icloud.com')
+        self.records['other@icloud.com']['account_id'] = 'other-owner'
+        self.manager.accounts['other-owner'] = {}
+        original = self.jobs.create_item
+        calls = []
+        def create(base, label):
+            calls.append(base)
+            if base == 'base@icloud.com':
+                raise ICloudSessionExpired('HTTP 421')
+            return original(base, label)
+        with patch.object(self.jobs, 'create_item', side_effect=create):
+            result = self.wait(self.jobs.start(list(self.jobs.sources()), 3, 'cookie', item_interval=0))
+        self.assertEqual(calls, ['base@icloud.com'] + ['other@icloud.com'] * 3)
+        self.assertEqual((result['total_created'],result['total_errors'],result['total_skipped']),(3,1,5))
+        skipped = [r for r in result['events'] if r.get('skipped')]
+        self.assertTrue(all(r['account_id'] == 'owner' for r in skipped))
+        self.assertEqual(len(result['events']), 9)
+
+    def test_already_revoked_account_is_skipped_without_any_create_request(self):
+        self.add_source('other@icloud.com')
+        self.records['other@icloud.com']['account_id'] = 'other-owner'
+        self.manager.accounts['other-owner'] = {}
+        self.manager.get_account = lambda key: {'session_requires_login': key == 'owner'}
+        original = self.jobs.create_item
+        with patch.object(self.jobs, 'create_item', side_effect=original) as create:
+            result = self.wait(self.jobs.start(list(self.jobs.sources()), 2, 'cookie', item_interval=0))
+        self.assertEqual([call.args[0] for call in create.call_args_list], ['other@icloud.com'] * 2)
+        self.assertEqual((result['total_created'],result['total_errors'],result['total_skipped']),(2,0,2))
 
     def test_interleaved_progress_logs_each_result_once_in_creation_order(self):
         with patch.object(self.jobs,'start',return_value='interleaved'):

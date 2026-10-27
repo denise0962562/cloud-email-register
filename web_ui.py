@@ -693,7 +693,8 @@ def api_email_bulk_history():
         job = _bulk_job(entry['id']) or {}
         history.append({**entry,'status':job.get('status','interrupted'),
                         'succeeded':job.get('succeeded',job.get('total_created',0)),
-                        'failed':job.get('failed',job.get('total_errors',0))})
+                        'failed':job.get('failed',job.get('total_errors',0)),
+                        'skipped':entry.get('skipped',0)+job.get('total_skipped',0)})
     return jsonify(ok=True,history=history),200,{'Cache-Control':'no-store'}
 
 

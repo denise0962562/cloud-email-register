@@ -29,11 +29,12 @@ def plus_address(base, tag):
 
 
 def safe_error(error):
+    from icloud_hme import ICloudSessionExpired
+    if isinstance(error, ICloudSessionExpired):
+        return 'Apple Cookie 已确认失效，请重新登录并更新 Cookie'
     status = re.search(r"HTTP (\d{3})", str(error))
     if status:
         code = status.group(1)
-        if code in ("401", "403", "421"):
-            return f"iCloud 会话不可用（HTTP {code}），请重新导入 Cookie"
         return f"上游服务返回 HTTP {code}"
     if isinstance(error, ValueError):
         # 不向页面返回上游原始响应或敏感配置。

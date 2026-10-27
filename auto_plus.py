@@ -13,6 +13,27 @@ class PlusCreationJobs(CreationJobs):
     document_kind = "plus_creation_job"
     target_label = "源地址"
     round_robin = True
+    record_skips = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._source_owners = {}
+        self._failed_addresses = set()
+
+    def group_key(self, target):
+        return self._source_owners.get(target, target)
+
+    def skip_reason(self, target):
+        account = self.manager.get_account(self.group_key(target)) or {}
+        if account.get('session_requires_login'):
+            return '账号 Cookie 已确认失效，跳过本轮剩余任务'
+
+    def stop_group(self, target, result):
+        # 收件服务的 401/403 并不能证明 Apple Cookie 失效。
+        return self.group_key(target) if result.get('session_expired') else None
+
+    def skipped_result(self, target, reason):
+        return {**super().skipped_result(target, reason), 'base_email': target}
 
     def sources(self):
         return {email: row for email, row in load_links().items()
@@ -33,7 +54,12 @@ class PlusCreationJobs(CreationJobs):
             raise ValueError("地址间隔必须为 0–300 秒的整数")
         for base in bases:
             plus_address(base, "a0b1")
-        return super().start(bases, count, label.lower(), interval=0, item_interval=item_interval)
+        with self._lock:
+            if self._active:
+                raise RuntimeError('已有创建任务运行中，请等待完成')
+            self._source_owners = {base: sources[base]['account_id'] for base in bases}
+            self._failed_addresses = set()
+            return super().start(bases, count, label.lower(), interval=0, item_interval=item_interval)
 
     def create_item(self, base, label):
         target = None
@@ -42,11 +68,15 @@ class PlusCreationJobs(CreationJobs):
             if not source:
                 raise ValueError("源地址已不可用")
             with self.manager._workflow_lock(source["account_id"]):
+                reason = self.skip_reason(base)
+                if reason:
+                    return {**self.skipped_result(base, reason), 'session_expired': True}
                 links = load_links()
                 # 发布失败留下的分裂地址先续配，避免不断留下不可用记录。
                 pending = next((email for email, row in links.items()
                                 if row.get("kind") == "plus" and row.get("base_email") == base
-                                and row.get("auto_prefix") == label and not is_ready(row)), None)
+                                and row.get("auto_prefix") == label and not is_ready(row)
+                                and email not in self._failed_addresses), None)
                 target = pending
                 if not pending:
                     # Four-character suffixes have a smaller namespace. Retry
@@ -69,9 +99,13 @@ class PlusCreationJobs(CreationJobs):
                         "account_id": source["account_id"], "verified": bool(record.get("verified")),
                         "inbox_url": record["inbox_url"], "line": target + "----" + record["inbox_url"]}
         except Exception as error:
+            from icloud_hme import ICloudSessionExpired
             if target:
                 update_link(target, {"last_error": safe_error(error)})
-            return {"ok": False, "email": target, "error": safe_error(error)}
+                if self.active:
+                    self._failed_addresses.add(target)
+            return {"ok": False, "email": target, "error": safe_error(error),
+                    'account_id': self.group_key(base), 'session_expired': isinstance(error, ICloudSessionExpired)}
 
 
 def validate_prefix(value):
