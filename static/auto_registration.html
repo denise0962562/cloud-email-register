@@ -9,10 +9,10 @@
 <div class="field-row"><label>每账号每轮创建数量<input id="count" name="count" type="number" min="1" max="20" required value="5"><small>每轮 1–20 个</small></label><label>每个邮箱间隔（秒）<input id="itemInterval" type="number" min="0" max="300" required value="3"><small>上一邮箱处理完成后开始计时</small></label></div>
 <fieldset><legend>容量轮换与分裂</legend>
 <label class="switch"><input id="rotationEnabled" type="checkbox" checked role="switch" aria-label="容量轮换开关"><span></span><b>达到阈值时轮换旧源地址</b></label>
-<div class="field-row"><label>触发轮换的源地址总数<input id="rotationThreshold" type="number" min="1" max="10000" value="450" required></label><label>每轮最多轮换源地址数<input id="rotationCount" type="number" min="1" max="20" value="5" required></label></div>
+<div class="field-row"><label>每主账号源地址轮换阈值<input id="rotationThreshold" type="number" min="1" max="10000" value="450" required></label><label>每主账号每轮最多轮换源地址数<input id="rotationCount" type="number" min="1" max="20" value="5" required></label></div>
 <div class="field-row"><label>单个删除失败重试次数<input id="deleteRetries" type="number" min="0" max="3" value="1" required></label><label>每个新源地址分裂数量<input id="splitPerSource" type="number" min="0" max="20" value="1" required></label></div>
 <div class="field-row"><label>每主账号窗口内新建上限<input id="hourlyCreateLimit" type="number" min="1" max="50" value="5" required></label><label>创建额度窗口（分钟）<input id="quotaWindowMinutes" type="number" min="1" max="1440" value="60" required></label></div>
-<p class="hint">达到阈值时，按创建时间从早到晚选择本项目管理的源地址，先撤销其全部分裂地址的收件链接和记录，再删除源地址、Apple 转发规则、收件箱及短链接。仅为完整清理成功的源地址补建新源，再分别分裂。失败最多按设置重试，单项失败继续其他项；Apple Cookie 失效只跳过所属主账号。本轮数量受创建数量、轮换数量和窗口剩余额度共同限制；窗口额度不足时不先删除旧地址。未达到阈值时正常创建新源并分裂。</p>
+<p class="hint">阈值、轮换数量和创建窗口额度均按每个 Apple 主账号独立计算，分裂地址不计入源地址总数。达到阈值时，按创建时间从早到晚选择本项目管理的源地址，先撤销其全部分裂地址的收件链接和记录，再删除源地址、Apple 转发规则、收件箱及短链接。仅为完整清理成功的源地址补建新源，再分别分裂。失败最多按设置重试，单项失败继续其他项；Apple Cookie 失效只跳过所属主账号。本轮数量受创建数量、轮换数量和窗口剩余额度共同限制；窗口额度不足时不先删除旧地址。未达到阈值时正常创建新源并分裂。</p>
 </fieldset>
 <label>每轮间隔方式<select id="mode"><option value="random">随机范围</option><option value="fixed">固定间隔</option></select></label>
 <div id="randomFields" class="field-row"><label>最短间隔（分钟）<input id="minMinutes" type="number" min="1" max="10080" required value="60"></label><label>最长间隔（分钟）<input id="maxMinutes" type="number" min="1" max="10080" required value="90"></label></div>
