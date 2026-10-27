@@ -26,6 +26,11 @@ class MailProvisioner:
     def prepare(self):
         if self.needs_public_config:
             load_config()
+        self.prepare_rules()
+        self.ensure_forward_target(allow_uninitialized=True)
+
+    def prepare_rules(self):
+        """Authenticate rule access without changing forwarding settings."""
         validation = self.client.validate_session()
         mcc = validation.get("webservices", {}).get("mcc", {}).get("url", "")
         host = urlparse(mcc).hostname or ""
@@ -36,7 +41,6 @@ class MailProvisioner:
             raise RuntimeError("无法识别 iCloud 账号")
         self.rules_url = f"{mcc.rstrip('/')}/cc/mail/v1/account/{quote(str(dsid), safe='')}/rules/"
         self.list_rules()  # Check access before creating any paid-account alias.
-        self.ensure_forward_target(allow_uninitialized=True)
 
     def ensure_forward_target(self, allow_uninitialized=False):
         listing = self.client._request("GET", f"{self.client._service_url}/v2/hme/list", max_attempts=1)
@@ -63,7 +67,7 @@ class MailProvisioner:
 
     def list_rules(self):
         data = self.client._request("GET", self.rules_url, max_attempts=1)
-        if not isinstance(data.get("mailRules"), list):
+        if data.get("requestStatus", "SUCCESS") != "SUCCESS" or not isinstance(data.get("mailRules"), list):
             raise RuntimeError("读取 iCloud 转发规则失败")
         return data["mailRules"]
 

@@ -359,11 +359,14 @@ class ICloudHME:
 
     # ---- 别名操作 ----
 
-    def list_aliases(self) -> List[Dict]:
+    def list_aliases(self, strict=False) -> List[Dict]:
         """列出所有 Hide My Email 别名"""
         self._resolve_service()
         self._log("获取别名列表...")
         response = self._request("GET", f"{self._service_url}/v2/hme/list")
+        if strict and (not isinstance(response, dict) or response.get("success") is not True
+                       or not isinstance(response.get("result", {}).get("hmeEmails"), list)):
+            raise RuntimeError("Apple 未确认返回完整邮箱列表，已停止删除")
         aliases = self._parse_alias_list(response)
         self._log(f"共 {len(aliases)} 个别名")
         return aliases

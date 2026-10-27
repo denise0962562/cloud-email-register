@@ -38,6 +38,29 @@ class FastAISyncTest(unittest.TestCase):
         self.assertIsNone(self.sync.active)
         return self.sync.get_job(job['id'])
 
+    def test_selected_bulk_ignores_batch_limit_resends_selected_and_can_cancel(self):
+        self.alias('one@icloud.com');self.alias('two@icloud.com');self.alias('other@icloud.com')
+        self.sync.configure({'batch_size':1})
+        first=self.wait(self.sync.start(emails=['one@icloud.com'],selected_only=True))
+        self.assertEqual(first['succeeded'],1)
+        entered,release=threading.Event(),threading.Event()
+        def blocked(*args,**kwargs):
+            entered.set();release.wait(2);return accepted()
+        self.http.post.side_effect=blocked
+        job=self.sync.start(emails=['one@icloud.com','two@icloud.com'],selected_only=True)
+        self.assertEqual(job['total'],2)
+        self.assertTrue(entered.wait(1))
+        with self.assertRaises(RuntimeError):
+            self.sync.start(emails=['other@icloud.com'],selected_only=True)
+        self.assertTrue(self.sync.cancel(job['id']))
+        release.set()
+        finished=self.wait(job)
+        self.assertEqual((finished['status'],finished['succeeded'],finished['processed']),('cancelled',1,1))
+        self.assertEqual(finished['items'][1]['status'],'pending')
+        self.assertFalse(self.sync.cancel(job['id']))
+        restored=FastAISync(self.db)
+        self.assertEqual(restored.get_job(job['id'])['status'],'cancelled')
+
     def test_bearer_token_persists_without_exposing_in_status_or_jobs(self):
         self.alias()
         client = admin_client()

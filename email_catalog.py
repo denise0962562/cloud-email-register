@@ -8,7 +8,7 @@ def filters(data):
     if not isinstance(data, dict):
         raise ValueError('筛选条件无效')
     result = {key: data.get(key, default) for key, default in
-              [('q',''),('account_id','all'),('address_type','all'),('sort','created_at'),('direction','desc')]}
+              [('q',''),('account_id','all'),('address_type','all'),('status','all'),('sync_status','all'),('sort','created_at'),('direction','desc')]}
     if any(not isinstance(value,str) for value in result.values()):
         raise ValueError('筛选条件必须是文本')
     result['q'] = result['q'].strip()
@@ -16,6 +16,8 @@ def filters(data):
         raise ValueError('关键词或地址类型无效')
     if result['sort'] not in ('created_at','fastai_synced_at') or result['direction'] not in ('asc','desc'):
         raise ValueError('排序条件无效')
+    if result['status'] not in ('all','ready','pending','verified','unverified','delete_failed','source_deleted','local_deleted') or result['sync_status'] not in ('all','pending','running','synced','failed'):
+        raise ValueError('邮箱状态或同步状态无效')
     return result
 
 
@@ -41,6 +43,9 @@ BASE = '''WITH latest AS (SELECT MAX(seq) AS seq FROM email_records GROUP BY low
  AND s.inbox_url=json_extract(l.data,'$.inbox_url')'''
 
 
+READY = "(COALESCE(json_extract(l.data,'$.deleted'),0)=0 AND COALESCE(json_extract(l.data,'$.deleting'),0)=0 AND COALESCE(json_extract(l.data,'$.parent_deleted'),0)=0 AND COALESCE(json_extract(l.data,'$.inbox_url'),'')<>'' AND (COALESCE(json_extract(l.data,'$.configured'),0)<>0 OR COALESCE(json_extract(l.data,'$.verified'),0)<>0))"
+
+
 def where(f):
     clauses, args = [], []
     if f['q']:
@@ -49,6 +54,15 @@ def where(f):
         clauses.append('e.account_id=?'); args.append(f['account_id'])
     if f['address_type'] != 'all':
         clauses.append("instr(substr(e.email,1,instr(e.email,'@')-1),'+')" + ('>0' if f['address_type']=='split' else '=0'))
+    status = f['status']
+    if status in ('ready','pending'): clauses.append(READY if status=='ready' else 'NOT '+READY)
+    if status in ('verified','unverified'):
+        clauses.append(READY+" AND COALESCE(json_extract(l.data,'$.verified'),0)"+('<>0' if status=='verified' else '=0'))
+    if status=='delete_failed': clauses.append("COALESCE(json_extract(l.data,'$.deletion_error'),'')<>''")
+    if status=='local_deleted': clauses.append("COALESCE(json_extract(l.data,'$.deleted'),0)<>0")
+    if status=='source_deleted': clauses.append("COALESCE(json_extract(l.data,'$.parent_deleted'),0)<>0")
+    if f['sync_status']!='all':
+        clauses.append("COALESCE(s.status,'pending')=?"); args.append(f['sync_status'])
     return clauses,args
 
 
@@ -77,15 +91,15 @@ def page(store, query, api_url):
             'all_count':sum(counts.values()),'account_counts':counts,'snapshot_max_seq':ceiling}
 
 
-def selected(db, selection):
+def selected(db, selection, api_url=""):
     if not isinstance(selection,dict): raise ValueError('请选择邮箱')
-    sql = 'SELECT lower(e.email) AS email,e.account_id,e.seq FROM email_records e WHERE e.seq IN (SELECT max(seq) FROM email_records GROUP BY lower(email))'
-    args = []
+    sql = BASE.replace("e.created_at,e.seq,l.data AS link_data,\n s.status AS sync_status,s.synced_at,s.last_error AS sync_error", "e.seq") + ' WHERE 1=1'
+    args = [api_url]
     if selection.get('all_matching') is True:
         if not isinstance(selection.get('filters'),dict) or type(selection.get('through_seq')) is not int or not 0 <= selection['through_seq'] <= 2**63-1:
             raise ValueError('全选范围无效，请重新全选')
-        clauses,args = where(filters(selection['filters']))
-        sql += ' AND e.seq<=?'; args = [selection['through_seq']]+args
+        clauses,filter_args = where(filters(selection['filters']))
+        sql += ' AND e.seq<=?'; args += [selection['through_seq']]+filter_args
         if clauses: sql += ' AND '+' AND '.join(clauses)
         excluded = selection.get('excluded',[])
         if not isinstance(excluded,list) or any(not isinstance(x,str) for x in excluded): raise ValueError('排除列表无效')
@@ -96,4 +110,16 @@ def selected(db, selection):
         raise ValueError('请选择邮箱')
     # JSON table avoids SQLite's bound-variable limit for large selections.
     sql += ' AND lower(e.email) IN (SELECT value FROM json_each(?))'
-    return [dict(zip(('email','account_id','seq'),r)) for r in db.execute(sql,(json.dumps(list({x.lower() for x in emails})),))]
+    return [dict(zip(('email','account_id','seq'),r)) for r in db.execute(sql,args+[json.dumps(list({x.lower() for x in emails}))])]
+
+
+def restore_legacy_deletions(store):
+    # Older versions removed only list rows. Restore visibility, keeping the
+    # tombstone so these sources stay excluded from automation and sync.
+    def restore(db):
+        db.execute('''INSERT INTO email_records(email,account_id,created_at)
+            SELECT l.email,COALESCE(json_extract(l.data,'$.account_id'),''),
+                   COALESCE(json_extract(l.data,'$.created_at'),'')
+            FROM inbox_links l WHERE json_extract(l.data,'$.deleted')=1
+            AND NOT EXISTS (SELECT 1 FROM email_records e WHERE lower(e.email)=l.email)''')
+    store.import_once('restore_local_only_deletions_v1',restore)

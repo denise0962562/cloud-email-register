@@ -38,6 +38,7 @@ class FastAISync:
         self.wake, self.stop_event = threading.Event(), threading.Event()
         self.thread = None
         self.work_thread = None
+        self.cancel_event = threading.Event()
         state = storage.read_document('fastai_sync_state') or {}
         self.config = {**DEFAULTS, **state.get('config', {})}
         self.next_run = state.get('next_run')
@@ -148,20 +149,23 @@ class FastAISync:
         with self.lock:
             return self.storage.read_document('fastai_sync_job',key)
 
-    def start(self, scheduled=False, emails=None, all_pending=False):
+    def start(self, scheduled=False, emails=None, all_pending=False, selected_only=False):
         with self.lock:
             if emails is not None and (not isinstance(emails,list) or not emails or any(not isinstance(e,str) for e in emails)):
                 raise ValueError('邮箱列表必须是非空字符串列表')
             if type(all_pending) is not bool: raise ValueError('同步全部参数必须为布尔值')
-            if self.active: return self.get_job(self.active)
+            if self.active:
+                if selected_only: raise RuntimeError('已有 FastAI 同步任务运行中，请等待完成')
+                return self.get_job(self.active)
             endpoint = self.config['api_url']
-            pending = self.pending(endpoint,include_synced=self.config['include_synced'] and not all_pending)
+            pending = self.pending(endpoint,include_synced=selected_only or (self.config['include_synced'] and not all_pending))
             if emails is not None:
                 selected={e.lower() for e in emails}
                 pending=[row for row in pending if row['email'] in selected]
-            if not all_pending: pending = pending[:self.config['batch_size']]
+            if not all_pending and not selected_only: pending = pending[:self.config['batch_size']]
+            self.cancel_event.clear()
             job = {'id':secrets.token_hex(12),'status':'running' if pending else 'completed',
-                   'api_url':endpoint,'include_synced':self.config['include_synced'] and not all_pending,'trigger':'scheduled' if scheduled else 'manual',
+                   'api_url':endpoint,'include_synced':selected_only or (self.config['include_synced'] and not all_pending),'trigger':'scheduled' if scheduled else 'manual',
                    'started_at':self.clock(),'finished_at':None if pending else self.clock(),
                    'total':len(pending),'processed':0,'succeeded':0,'failed':0,
                    'message':'正在同步' if pending else '没有可同步的未同步邮箱',
@@ -179,6 +183,12 @@ class FastAISync:
                 self.work_thread = threading.Thread(target=self._run,args=(job,pending,self.config['api_token']),daemon=True)
                 self.work_thread.start()
             return response
+
+    def cancel(self, job_id):
+        with self.lock:
+            if self.active != job_id: return False
+            self.cancel_event.set()
+            return True
 
     def _set_status(self, row, job, status, error=''):
         with self.storage.connect() as db:
@@ -217,6 +227,7 @@ class FastAISync:
         http.trust_env = False
         try:
             for row,item in zip(rows,job['items']):
+                if self.cancel_event.is_set(): break
                 with self.lock:
                     item['status']='running'
                     self._set_status(row,job,'running')
@@ -236,12 +247,13 @@ class FastAISync:
                         job['failed']+=1
                     stop = error.stop
                 with self.lock:
+                    item['finished_at']=self.clock()
                     job['processed']+=1
                     self._log('info' if item['status']=='synced' else 'error',row['email']+'：'+(item.get('action','同步成功') if item['status']=='synced' else item['error']))
                     self._save_job(job)
                     self._persist_state()
                 if stop: break
-            job['status']='completed' if job['processed']==job['total'] else 'failed'
+            job['status']='cancelled' if self.cancel_event.is_set() else ('completed' if job['processed']==job['total'] else 'failed')
             job['message']='同步结束：成功 %d，失败 %d，未尝试 %d' % (job['succeeded'],job['failed'],job['total']-job['processed'])
         except Exception:
             job.update(status='failed',message='同步任务异常中止；已成功记录保留，可重试未同步邮箱')

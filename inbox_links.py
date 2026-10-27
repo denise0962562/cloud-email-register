@@ -41,7 +41,7 @@ def update_link(alias, values, path=REGISTRY):
 
 
 def is_ready(record):
-    return bool(not record.get("deleted") and record.get("inbox_url") and (record.get("configured") or record.get("verified")))
+    return bool(not record.get("deleted") and not record.get("deleting") and not record.get("parent_deleted") and record.get("inbox_url") and (record.get("configured") or record.get("verified")))
 
 
 def export_lines(emails, path=REGISTRY):

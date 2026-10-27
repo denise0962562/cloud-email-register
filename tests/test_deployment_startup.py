@@ -30,6 +30,7 @@ class DeploymentStartupTest(unittest.TestCase):
             manager.list_accounts.return_value = []
             jobs = Mock()
             jobs.active = None
+            jobs.sources.return_value = {}
             auto = AutoRegistration(jobs, manager, root / 'state.json')
             split = AutoPlusAddresses(jobs, manager, root / 'state.json')
             sync = FastAISync(store)

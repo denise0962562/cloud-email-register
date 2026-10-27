@@ -3,6 +3,7 @@ import copy
 import re
 import secrets
 import threading
+import time
 from storage import Storage
 
 
@@ -42,6 +43,7 @@ class CreationJobs:
                 raise RuntimeError("已有创建任务运行中，请等待完成")
             job_id = secrets.token_hex(12)
             self._jobs[job_id] = {"id": job_id, "status": "running", "results": {}, "events": [], "lines": [],
+                                  "started_at": time.time(), "total": sum(map(len,repair.values())) if repair is not None else len(account_ids)*count,
                                   "total_created": 0, "total_errors": 0, "progress": "准备账号配置"}
             self._persist(job_id)
             self._active = job_id
@@ -69,6 +71,7 @@ class CreationJobs:
     def _append(self, job_id, account_id, result):
         with self._lock:
             job = self._jobs[job_id]
+            result.setdefault("finished_at", time.time())
             job["results"].setdefault(account_id, []).append(result)
             job["events"].append(result)
             if result.get("ok"):
@@ -135,6 +138,7 @@ class CreationJobs:
                 self._jobs[job_id].update(status="failed", error=str(error)[:250], ok=False)
         finally:
             with self._lock:
+                self._jobs[job_id]["finished_at"] = time.time()
                 self._persist(job_id)
                 self._active = None
                 self._cancel_events.pop(job_id, None)

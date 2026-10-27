@@ -55,12 +55,59 @@ class EmailCatalogTests(unittest.TestCase):
         data=self.client.get('/api/emails?page=1&q=one').json
         self.add('one-new@icloud.com')
         selection={'all_matching':True,'filters':{'q':'one'},'through_seq':data['snapshot_max_seq'],'excluded':['one2@icloud.com']}
-        r=self.client.post('/api/emails/bulk',json={'action':'delete','selection':selection})
-        self.assertEqual((r.status_code,r.json['deleted']),(200,1))
-        self.assertEqual({x['email'] for x in self.store.emails()},{'one2@icloud.com','other@icloud.com','one-new@icloud.com'})
-        record=self.store.load_links()['one@icloud.com']
-        self.assertIn('VERY_PRIVATE_TOKEN',record['forward_inbox_url'])
-        self.assertFalse(is_ready(record))
+        with patch.object(web_ui._email_delete_jobs,'start_emails',return_value='delete-job') as start:
+            r=self.client.post('/api/emails/bulk',json={'action':'delete','selection':selection})
+        self.assertEqual((r.status_code,r.json['selected']),(202,1))
+        self.assertEqual([row['email'] for row in start.call_args.args[0]],['one@icloud.com'])
+        self.assertEqual(len(self.store.emails()),4)  # Remote confirmation owns removal.
+
+    def test_legacy_local_only_deletions_restore_once_without_enabling_sources(self):
+        import email_catalog
+        self.store.update_link('legacy@icloud.com',{'deleted':True,'configured':True,'inbox_url':'public','account_id':'a'})
+        email_catalog.restore_legacy_deletions(self.store)
+        email_catalog.restore_legacy_deletions(self.store)
+        rows=email_catalog.page(self.store,{'status':'local_deleted'},'https://sync.test')['rows']
+        self.assertEqual([r['email'] for r in rows],['legacy@icloud.com'])
+        self.assertFalse(is_ready(self.store.load_links()['legacy@icloud.com']))
+
+    def test_status_filters_apply_identically_to_page_and_all_selection(self):
+        import email_catalog
+        self.add('ready@icloud.com');self.add('pending@icloud.com',ready=False)
+        self.add('verified@icloud.com');self.store.update_link('verified@icloud.com',{'verified':True})
+        with self.store.connect() as db:
+            db.execute("INSERT INTO fastai_sync VALUES(?,?,?,?,?,?,?)",('ready@icloud.com','https://sync.test','https://webmail.fastaiapi.cloud/m/public','synced',100,'','job'))
+            # Same email with obsolete link must be pending for the current link.
+            db.execute("INSERT INTO fastai_sync VALUES(?,?,?,?,?,?,?)",('verified@icloud.com','https://sync.test','old-link','synced',100,'','old'))
+        for query,expected in [({'status':'ready'},{'ready@icloud.com','verified@icloud.com'}),
+                               ({'status':'pending'},{'pending@icloud.com'}),
+                               ({'status':'verified'},{'verified@icloud.com'}),
+                               ({'status':'unverified','sync_status':'synced'},{'ready@icloud.com'}),
+                               ({'status':'ready','sync_status':'pending'},{'verified@icloud.com'})]:
+            page=email_catalog.page(self.store,{'page':1,**query},'https://sync.test')
+            self.assertEqual({r['email'] for r in page['rows']},expected)
+            with self.store.connect() as db:
+                selected=email_catalog.selected(db,{'all_matching':True,'filters':query,'through_seq':page['snapshot_max_seq']},'https://sync.test')
+            self.assertEqual({r['email'] for r in selected},expected)
+        self.assertEqual(self.client.get('/api/emails?page=1&sync_status=invalid').status_code,400)
+
+    def test_sync_bulk_records_history_and_never_imports_unselected(self):
+        from fastai_sync import FastAISync
+        from tests.test_fastai_sync import accepted
+        self.add('one@icloud.com');self.add('two@icloud.com');self.add('pending@icloud.com',ready=False)
+        self.add('other@icloud.com')
+        http=Mock();http.post.return_value=accepted()
+        sync=FastAISync(self.store,http_factory=lambda:http);sync.configure({'batch_size':1})
+        with patch.object(web_ui,'_fastai_sync',sync):
+            r=self.client.post('/api/emails/bulk',json={'action':'sync','selection':{'emails':['one@icloud.com','two@icloud.com','pending@icloud.com']}})
+            self.assertEqual((r.status_code,r.json['selected'],r.json['skipped']),(202,2,1))
+            sync.work_thread.join(3)
+            job=self.client.get('/api/emails/bulk-jobs/'+r.json['job_id']).json['job']
+            self.assertEqual((job['succeeded'],len(job['items'])),(2,2))
+            history=self.client.get('/api/emails/bulk-jobs').json['history']
+            self.assertEqual(history[0]['succeeded'],2)
+            self.assertNotIn('VERY_PRIVATE_TOKEN',str(history))
+        imported={call.kwargs['json']['text'].split('----')[0] for call in http.post.call_args_list}
+        self.assertEqual(imported,{'one@icloud.com','two@icloud.com'})
 
     def test_selected_split_is_once_per_source_and_rejects_split_addresses(self):
         for email in ['one@icloud.com','two@icloud.com','one+tag@icloud.com']:self.add(email)
@@ -92,7 +139,7 @@ class EmailCatalogTests(unittest.TestCase):
             self.assertNotIn('+',records[0]['email'])
             start.reset_mock()
             r=self.client.post('/api/emails/bulk',json={'action':'clear','selection':{'emails':['one+tag@icloud.com']}})
-            self.assertEqual(r.json['selected'],0);start.assert_not_called()
+            self.assertEqual(r.json['selected'],0);self.assertIn('job_id',r.json);start.assert_not_called()
 
     def test_invalid_all_selection_and_empty_ids_cannot_become_select_all(self):
         self.add('one@icloud.com')
