@@ -55,6 +55,9 @@ class Storage:
                     inbox_url TEXT NOT NULL, status TEXT NOT NULL, synced_at REAL,
                     last_error TEXT NOT NULL DEFAULT '', job_id TEXT NOT NULL,
                     PRIMARY KEY(email,api_url));
+                CREATE TABLE IF NOT EXISTS split_history(
+                    email TEXT PRIMARY KEY, base_email TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS split_history_base ON split_history(base_email);
                 PRAGMA user_version=1;
             ''')
 
@@ -146,7 +149,47 @@ class Storage:
         with self.connect() as db:
             return {key: json.loads(data) for key, data in db.execute('SELECT email,data FROM inbox_links ORDER BY rowid')}
 
+    @staticmethod
+    def _record_split(db, email, record):
+        """成功配置的分裂地址只记一次；重试、重复补全和验证不会重复累计。"""
+        email = email.lower()
+        base = (record.get('base_email') or '').lower()
+        if ('+' not in email.split('@')[0] or not base or '+' in base.split('@')[0]
+                or email.split('+', 1)[0] + '@' + email.split('@')[-1] != base):
+            return
+        if not record.get('inbox_url') or not (record.get('configured') or record.get('verified')):
+            return
+        db.execute('INSERT OR IGNORE INTO split_history VALUES(?,?,?)',
+                   (email, base, record.get('created_at') or record.get('updated_at')
+                    or datetime.now(timezone.utc).isoformat()))
+
+    def ensure_split_history(self):
+        """从现有配置和成功任务回填历史；独立账本在删除分裂地址后仍保留。"""
+        def backfill(db):
+            for email, raw in db.execute('SELECT email,data FROM inbox_links').fetchall():
+                self._record_split(db, email, json.loads(raw))
+            for kind, raw in db.execute("SELECT kind,data FROM documents WHERE kind IN ('plus_creation_job','email_deletion')").fetchall():
+                document = json.loads(raw)
+                if kind == 'email_deletion':
+                    record = document.get('link') or {}
+                    self._record_split(db, document.get('email', ''), record)
+                else:
+                    events = document.get('events') or [
+                        row for rows in document.get('results', {}).values() for row in rows]
+                    for row in events:
+                        if row.get('ok') and row.get('base_email') and row.get('inbox_url'):
+                            self._record_split(db, row.get('email', ''),
+                                {**row, 'configured': True})
+        self.import_once('split_history_backfill_v1', backfill)
+
+    def split_counts(self):
+        """累计成功生成的分裂地址数量，不受当前列表筛选或子地址删除影响。"""
+        self.ensure_split_history()
+        with self.connect() as db:
+            return dict(db.execute('SELECT base_email,count(*) FROM split_history GROUP BY base_email'))
+
     def update_link(self, email, values):
+        self.ensure_split_history()
         email = email.lower()
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -155,6 +198,8 @@ class Storage:
             record.update(values)
             record['updated_at'] = datetime.now(timezone.utc).isoformat()
             db.execute('INSERT INTO inbox_links VALUES (?,?) ON CONFLICT(email) DO UPDATE SET data=excluded.data', (email, encode(record)))
+            # 配置写入与累计记账在同一事务内，避免并发丢计数或中断后重复计数。
+            self._record_split(db, email, record)
             return record
 
     def import_emails(self, path):

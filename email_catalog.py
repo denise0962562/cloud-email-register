@@ -67,6 +67,7 @@ def where(f):
 
 
 def page(store, query, api_url):
+    store.ensure_split_history()
     f = filters(dict(query))
     try:
         number, size = int(query.get('page',1)), int(query.get('page_size',50))
@@ -83,6 +84,13 @@ def page(store, query, api_url):
         ordered = sql + f' ORDER BY ({key}) IS NULL, {key} {f["direction"]}, e.seq DESC'
         cursor = db.execute(ordered+' LIMIT ? OFFSET ?',[api_url]+args+[size,(number-1)*size])
         rows = [dict(zip([c[0] for c in cursor.description],r)) for r in cursor]
+        # 仅统计当前页源地址，累计值来自独立历史账本，不受分页和删除影响。
+        source_emails = [r['email'] for r in rows if '+' not in r['email'].split('@')[0]]
+        split_counts = dict(db.execute(
+            'SELECT base_email,count(*) FROM split_history WHERE base_email IN '
+            '(SELECT value FROM json_each(?)) GROUP BY base_email', (json.dumps(source_emails),)))
+        for row in rows:
+            row['split_count'] = split_counts.get(row['email'], 0) if row['email'] in source_emails else None
         counts = dict(db.execute('SELECT e.account_id,count(*) FROM email_records e JOIN '
                                  '(SELECT max(seq) seq FROM email_records GROUP BY lower(email)) latest '
                                  'ON e.seq=latest.seq GROUP BY e.account_id'))
