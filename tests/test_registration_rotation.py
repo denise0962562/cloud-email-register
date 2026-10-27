@@ -134,6 +134,42 @@ class RotationTest(unittest.TestCase):
         self.assertEqual(job['total_created'],4)
         self.assertEqual(job['total_errors'],5)
 
+    def test_quota_release_uses_later_creation_time_and_is_per_account(self):
+        from datetime import datetime, timezone
+        self.jobs.config = {**self.config, 'hourly_create_limit': 2, 'quota_window_minutes': 10}
+        now = time.time()
+        self.store.add_email('new@icloud.com', 'a')
+        self.store.add_email('new+child@icloud.com', 'a')
+        self.store.add_email('other@icloud.com', 'b')
+        with self.store.connect() as db:
+            db.execute('UPDATE email_records SET created_at=? WHERE email=?',
+                (datetime.fromtimestamp(now-100, timezone.utc).isoformat(), 'new@icloud.com'))
+        self.store.write_document('registration_attempt', {'account_id':'a','started_at':now-110,
+            'email':'new@icloud.com'}, 'confirmed')
+        self.store.write_document('registration_attempt', {'account_id':'a','started_at':now-50}, 'unknown')
+        with patch('registration_rotation.time.time', return_value=now):
+            quota = self.jobs.quota_status('a')
+            self.assertEqual((quota['used'], quota['remaining']), (2, 0))
+            self.assertAlmostEqual(quota['next_release_at'], now+500)
+            self.assertEqual(self.jobs.quota_status('b')['used'], 1)
+        with patch('registration_rotation.time.time', return_value=now+500):
+            quota = self.jobs.quota_status('a')
+            self.assertEqual((quota['used'], quota['remaining']), (1, 1))
+            self.assertAlmostEqual(quota['next_release_at'], now+550)
+
+    def test_each_account_logs_initial_and_final_quota_with_custom_settings(self):
+        job=self.run_job({**self.config, 'hourly_create_limit':2,
+                          'quota_window_minutes':10, 'count':1, 'split_per_source':0}, ['a','b'])
+        quota_events=[r for r in job['events'] if r['action']=='quota']
+        self.assertEqual(len(quota_events),4)
+        for account in ('a','b'):
+            before, after=[r for r in quota_events if r['account_id']==account]
+            self.assertEqual(before['quota']['used'],0)
+            self.assertIsNone(before['quota']['next_release_at'])
+            self.assertEqual((after['quota']['used'],after['quota']['remaining']), (1,1))
+            self.assertIn('最近 10 分钟最多 2 个源邮箱',after['message'])
+            self.assertIn('北京时间',after['message'])
+
     def test_hourly_quota_prevents_repeated_deletions_and_survives_restart(self):
         self.sources()
         self.run_job()

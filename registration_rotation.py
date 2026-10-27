@@ -4,6 +4,9 @@ import json
 import re
 import secrets
 import time
+import math
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from creation_jobs import CreationJobs
 from email_catalog import stamp
@@ -61,23 +64,54 @@ class RegistrationJobs(CreationJobs):
         return (isinstance(error, ICloudSessionExpired)
                 or bool((self.manager.get_account(account) or {}).get('session_requires_login')))
 
+    def _quota_state(self, db, now, account):
+        """统计滑动窗口，释放时间沿用相同去重规则，避免成功与尝试重复计额。"""
+        window = self.config['quota_window_minutes'] * 60
+        db.create_function('mail_stamp', 1, stamp)
+        sources = {}
+        for email, created in db.execute(
+                "SELECT email,mail_stamp(created_at) FROM email_records WHERE account_id=? "
+                "AND instr(substr(email,1,instr(email,'@')-1),'+')=0 AND mail_stamp(created_at)>?",
+                (account, now - window)):
+            email = email.lower()
+            sources[email] = max(sources.get(email, created), created)
+        attempts = [json.loads(raw) for raw, in db.execute(
+            "SELECT data FROM documents WHERE kind='registration_attempt' "
+            "AND json_extract(data,'$.account_id')=? AND json_extract(data,'$.started_at')>?",
+            (account, now - window))]
+
+        def usage(at):
+            recent = {email for email, created in sources.items() if created + window > at}
+            return len(recent) + sum(row['started_at'] + window > at and
+                (not row.get('email') or row['email'].lower() not in recent) for row in attempts)
+
+        used = usage(now)
+        # 邮箱创建时间可能晚于预留时间，不能直接把最早尝试时间当释放时间。
+        expiries = sorted({t + window for t in sources.values()} |
+                          {row['started_at'] + window for row in attempts})
+        release = next((at for at in expiries if usage(at) < used), None)
+        return {'used': used, 'remaining': max(0, self.config['hourly_create_limit'] - used),
+                'limit': self.config['hourly_create_limit'],
+                'window_minutes': self.config['quota_window_minutes'], 'next_release_at': release}
+
+    def quota_status(self, account):
+        with self.storage.connect() as db:
+            return self._quota_state(db, time.time(), account)
+
+    def _log_quota(self, job_id, account, phase):
+        quota = self.quota_status(account)
+        release = (datetime.fromtimestamp(math.ceil(quota['next_release_at']), ZoneInfo('Asia/Shanghai'))
+                   .strftime('%Y-%m-%d %H:%M:%S') + '（北京时间）'
+                   if quota['next_release_at'] else '无占用，无待释放额度')
+        self._event(job_id, account, 'quota', {'ok': True, 'quota': quota,
+            'message': f"{phase}额度：最近 {quota['window_minutes']} 分钟最多 {quota['limit']} 个源邮箱；"
+                       f"已用 {quota['used']}，剩余 {quota['remaining']}；下次释放：{release}（无新增创建时）"})
+
     def _reserve_quota(self, account, reserve=False):
         now = time.time()
         with self.storage.connect() as db:
-            db.create_function('mail_stamp', 1, stamp)
             db.execute('BEGIN IMMEDIATE')
-            since = now - self.config['quota_window_minutes'] * 60
-            recent = {row[0].lower() for row in db.execute(
-                "SELECT DISTINCT email FROM email_records WHERE account_id=? "
-                "AND instr(substr(email,1,instr(email,'@')-1),'+')=0 AND mail_stamp(created_at)>=?",
-                (account, since))}
-            attempts = [json.loads(raw) for raw, in db.execute(
-                "SELECT data FROM documents WHERE kind='registration_attempt' "
-                "AND json_extract(data,'$.account_id')=? AND json_extract(data,'$.started_at')>=?",
-                (account, since))]
-            # 已确认的新地址与尝试记录去重；结果未知的创建保守占用额度。
-            used = len(recent) + sum(not row.get('email') or row['email'].lower() not in recent for row in attempts)
-            available = max(0, self.config['hourly_create_limit'] - used)
+            available = self._quota_state(db, now, account)['remaining']
             if not reserve:
                 return available
             if not available:
@@ -238,7 +272,11 @@ class RegistrationJobs(CreationJobs):
                 try:
                     # 全流程持有账号工作锁，防止其他线程在选择旧地址后插入分裂或创建。
                     with self.manager._workflow_lock(account):
-                        self._account(job_id, account, cancel)
+                        self._log_quota(job_id, account, '执行前')
+                        try:
+                            self._account(job_id, account, cancel)
+                        finally:
+                            self._log_quota(job_id, account, '本账号结束时')
                 except Exception as error:
                     self._event(job_id, account, 'account_error', {'ok': False,
                         'error': '主账号 Cookie 失效，跳过该账号' if self._expired(account, error) else self._error(error)})
