@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 from storage import Storage, database_for
+from registration_policy import ROTATION_DEFAULTS
 
 DEFAULTS = {"enabled": False, "account_ids": [], "count": 5, "interval_mode": "random",
             "interval_minutes": 60, "min_minutes": 60, "max_minutes": 90,
@@ -16,7 +17,7 @@ DEFAULTS = {"enabled": False, "account_ids": [], "count": 5, "interval_mode": "r
 
 class AutoRegistration:
     # 调度、历史和下载状态共用同一实现，具体任务只定义目标与配置约束。
-    defaults = DEFAULTS
+    defaults = {**DEFAULTS, **ROTATION_DEFAULTS}
     document_kind = "auto"
     target_key = "account_ids"
     target_label = "账号"
@@ -76,6 +77,14 @@ class AutoRegistration:
             if not isinstance(data, dict) or set(data) - set(self.defaults):
                 raise ValueError("自动创建配置字段无效")
             config = {**self.config, **data}
+            if 'rotation_enabled' in self.defaults:
+                if type(config['rotation_enabled']) is not bool:
+                    raise ValueError('容量轮换开关必须为布尔值')
+                for key, low, high in (('rotation_threshold', 1, 10000), ('rotation_count', 1, 20),
+                                       ('delete_retries', 0, 3), ('split_per_source', 0, 20),
+                                       ('hourly_create_limit', 1, 50), ('quota_window_minutes', 1, 1440)):
+                    if type(config[key]) is not int or not low <= config[key] <= high:
+                        raise ValueError(f'{key} 必须为 {low} 到 {high} 的整数')
             if type(config["enabled"]) is not bool: raise ValueError("开关必须为布尔值")
             ids = config[self.target_key]
             # 已移除的目标不能阻止用户关闭调度和取消当前任务。
@@ -112,6 +121,8 @@ class AutoRegistration:
             return self.snapshot()
 
     def start_job(self, ids):
+        if hasattr(type(self.jobs), 'start_registration'):
+            return self.jobs.start_registration(ids, self.config)
         return self.jobs.start(ids, self.config["count"], self.config["label"],
                                item_interval=self.config["item_interval_seconds"])
 
@@ -151,16 +162,19 @@ class AutoRegistration:
                     new = results[self.current["logged_results"]:]
                     for result in new:
                         self.log("success" if result.get("ok") else 'warn' if result.get('skipped') else "error",
-                                 (result.get("email", "") + " 创建及收件配置完成") if result.get("ok")
+                                 (result.get("message") or (result.get("email", "") + " 创建及收件配置完成")) if result.get("ok")
                                  else ('已跳过：' if result.get('skipped') else '单个邮箱失败：') + str(result.get("error", "配置失败"))[:240])
                     self.current.update(logged_results=len(results), lines=job.get("lines", []),
                                         total_created=job.get("total_created", 0), total_errors=job.get("total_errors", 0),
                                         total_skipped=job.get('total_skipped', 0),
                                         progress=job.get("progress", ""))
+                    for key in ('total_split', 'total_deleted', 'total_deleted_split'):
+                        if key in job:
+                            self.current[key] = job[key]
                     if job["status"] != "running":
                         keep_deadline = self.current.get("trigger") == "manual" and not job.get("total_created", 0)
                         self.current.update(status=job["status"], finished_at=self.clock())
-                        self.log("info", f"本轮结束：成功 {job.get('total_created', 0)} 个，失败 {job.get('total_errors', 0)} 个，跳过 {job.get('total_skipped', 0)} 个")
+                        self.log("info", job['progress'] if 'total_split' in job or 'total_deleted' in job else f"本轮结束：成功 {job.get('total_created', 0)} 个，失败 {job.get('total_errors', 0)} 个，跳过 {job.get('total_skipped', 0)} 个")
                         self.history.insert(0, self.current)
                         self.history = self.history[:40]
                         self.current = None

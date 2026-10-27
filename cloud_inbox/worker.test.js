@@ -51,3 +51,21 @@ test('admin registration requires an independent admin secret', async () => {
   const response = await worker.fetch(new Request('https://webmail.fastaiapi.cloud/m/_admin/mailboxes/mbx_123456789',{method:'PUT'}),{ADMIN_TOKEN:'admin-only'});
   assert.equal(response.status, 401);
 });
+
+test('撤销短链接校验邮箱归属，删除幂等且旧链接立即失效', async()=>{
+ const id='mbx_123456789',secret='x'.repeat(43),tokenHash=await hashToken(secret);
+ let record={id,alias:'old+tag@icloud.com',token_hash:tokenHash,destination:'box@fastaiapi.cloud'};
+ const env={ADMIN_TOKEN:'private-admin',DB:{prepare(sql){return {bind(...args){return {
+   first:async()=>record,
+   run:async()=>{assert.equal(args[0],id);record=null}
+ }}}}}};
+ const call=(alias,hash=tokenHash)=>worker.fetch(new Request('https://webmail.fastaiapi.cloud/m/_admin/mailboxes/'+id,{
+   method:'DELETE',headers:{Authorization:'Bearer private-admin','Content-Type':'application/json'},
+   body:JSON.stringify({alias,token_hash:hash})}),env);
+ assert.equal((await call('another@icloud.com')).status,409);
+ assert.ok(record);
+ assert.equal((await call('old+tag@icloud.com')).status,200);
+ assert.equal((await call('old+tag@icloud.com')).status,200);
+ const old=await worker.fetch(new Request('https://webmail.fastaiapi.cloud/m/'+id+'.'+secret),env);
+ assert.equal(old.status,404);
+});

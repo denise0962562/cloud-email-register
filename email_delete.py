@@ -44,11 +44,15 @@ class EmailDeleteJobs(CreationJobs):
                 status = re.search(r'HTTP (401|403|421)\b',message)
                 if status: message = 'iCloud 会话不可用（HTTP '+status.group(1)+'），请更新所属账号 Cookie 后重试删除'
                 self.storage.update_link(target, {'deletion_error':message})
-                return {'ok':False, 'email':target, 'error':message}
+                from icloud_hme import ICloudSessionExpired
+                return {'ok':False, 'email':target, 'error':message,
+                        'session_expired': isinstance(error, ICloudSessionExpired) or bool(status and status.group(1)=='421')}
 
     def _delete(self, row):
         email, account = row['email'], row['account_id']
-        link = self.storage.load_links().get(email,{})
+        previous = self.storage.read_document('email_deletion', email) or {}
+        # 旧版只删本地记录的邮箱仍需撤销远端短链接，从删除审计恢复清理凭据。
+        link = {**previous.get('link', {}), **self.storage.load_links().get(email, {})}
         split = '+' in email.split('@',1)[0]
         if not split:
             client, p = self._context(account)
@@ -94,9 +98,17 @@ class EmailDeleteJobs(CreationJobs):
                     account_data['alias_total'] = len(remaining)
                     account_data['alias_active'] = sum(bool(a.get('active')) for a in remaining)
                     self.manager._save()
+        if getattr(self, 'cleanup_inboxes', False):
+            from public_inbox import revoke_inbox_link
+            from mailbox_cleanup import delete_domain_inbox
+            revoke_inbox_link({**link, 'email': email})
+            if not split and not link.get('domain_inbox_deleted'):
+                delete_domain_inbox({**link, 'email': email}, self.storage)
+                # 物理邮箱删除已确认后立即保存，后续步骤重试不再使用已撤销的 JWT。
+                self.storage.update_link(email, {'domain_inbox_deleted': True})
         # Plus rows only remove their own mapping; never touch their source rule.
         journal = self.storage.read_document('email_deletion',email) or {'email':email,'account_id':account,'link':link}
-        journal.update(stage='completed',split=split)
+        journal.update(stage='completed',split=split,remote_cleanup_completed=bool(getattr(self, 'cleanup_inboxes', False)))
         with self.storage.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             if not split:

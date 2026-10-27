@@ -57,6 +57,17 @@ async function handle(request, env) {
   const admin = /^\/m\/_admin\/mailboxes\/(mbx_\d{9})$/.exec(url.pathname);
   if (admin) {
     if (!env.ADMIN_TOKEN || !equalSecret(request.headers.get('Authorization'), 'Bearer ' + env.ADMIN_TOKEN)) return json({error: 'Unauthorized'}, 401);
+    if (request.method === 'DELETE') {
+      const data = await request.json();
+      if (!/^[^\s@]+@icloud\.com$/.test(data.alias || '') || !/^[a-f0-9]{64}$/.test(data.token_hash || '')) return json({error: 'Invalid mailbox'}, 400);
+      const existing = await env.DB.prepare('SELECT * FROM hme_public_inboxes WHERE id = ?').bind(admin[1]).first();
+      // 删除同时校验邮箱和原短链接凭据，防止误撤销其他地址；已不存在时幂等成功。
+      if (existing && (existing.alias !== data.alias || !equalSecret(existing.token_hash, data.token_hash))) return json({error: 'Mailbox mapping conflict'}, 409);
+      if (existing) await env.DB.prepare('DELETE FROM hme_public_inboxes WHERE id = ? AND alias = ? AND token_hash = ?')
+        .bind(admin[1], data.alias, data.token_hash).run();
+      const remaining = await env.DB.prepare('SELECT * FROM hme_public_inboxes WHERE id = ?').bind(admin[1]).first();
+      return remaining ? json({error: 'Deletion not confirmed'}, 502) : json({ok: true, id: admin[1], alias: data.alias});
+    }
     if (request.method !== 'PUT') return json({error: 'Method not allowed'}, 405);
     const data = await request.json();
     if (!/^[^\s@]+@icloud\.com$/.test(data.alias || '') || !/^[a-f0-9]{64}$/.test(data.token_hash || '')

@@ -55,3 +55,29 @@ def publish_inbox_link(record, *, registry=REGISTRY, config=None, http=None):
         raise RuntimeError("专属收件服务未确认邮箱归属")
     return update_link(record["email"], {"inbox_url": f"{PUBLIC_ORIGIN}/m/{mailbox_id}.{secret}",
                                          "public_registered": True}, registry)
+
+
+def revoke_inbox_link(record, *, config=None, http=None):
+    """撤销单个邮箱的短链接映射；分裂地址不会触碰同源的共享收件箱。"""
+    mailbox_id, secret = record.get('public_id'), record.get('public_secret')
+    if not mailbox_id:
+        if record.get('public_registered'):
+            raise RuntimeError('短链接标识缺失，未确认撤销')
+        return
+    import re
+    if not re.fullmatch(r'mbx_\d{9}', mailbox_id) or not secret:
+        raise RuntimeError('短链接撤销凭据不完整')
+    config = config or load_config()
+    try:
+        response = (http or requests.Session()).delete(
+            PUBLIC_ORIGIN + '/m/_admin/mailboxes/' + mailbox_id,
+            headers={'Authorization': 'Bearer ' + config['admin_token']},
+            json={'alias': record['email'], 'token_hash': hashlib.sha256(secret.encode()).hexdigest()},
+            timeout=25, allow_redirects=False)
+    except requests.RequestException:
+        raise RuntimeError('短链接撤销结果未确认，可重试') from None
+    if response.status_code != 200:
+        raise RuntimeError('短链接撤销服务返回 HTTP ' + str(response.status_code))
+    data = response.json()
+    if data.get('ok') is not True or data.get('alias') != record['email']:
+        raise RuntimeError('短链接服务未确认撤销结果')

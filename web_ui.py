@@ -16,6 +16,7 @@ from auto_registration import AutoRegistration
 from storage import Storage, database_for
 from fastai_sync import FastAISync
 from email_delete import EmailDeleteJobs
+from registration_rotation import RegistrationJobs
 from plus_addressing import PlusJobs
 from auto_plus import PlusCreationJobs, AutoPlusAddresses
 import email_catalog
@@ -42,9 +43,11 @@ _plus_creation_jobs = PlusCreationJobs(_account_mgr)
 _fastai_sync = FastAISync(_account_mgr.storage)
 _auto_plus = AutoPlusAddresses(_plus_creation_jobs, _account_mgr, RESULTS_DIR / "auto_plus.json", fastai_sync=_fastai_sync)
 _creation_jobs = CreationJobs(_account_mgr, on_result=lambda result: _increment_state(today_created=1, total_created=1) if result.get("alias_created") else None)
-_auto_registration = AutoRegistration(_creation_jobs, _account_mgr, RESULTS_DIR / "auto_registration.json")
+_registration_jobs = RegistrationJobs(_account_mgr, on_result=_creation_jobs.on_result)
+_auto_registration = AutoRegistration(_registration_jobs, _account_mgr, RESULTS_DIR / "auto_registration.json")
 _inbox_clear_jobs = InboxClearJobs(_account_mgr)
 _email_delete_jobs = EmailDeleteJobs(_account_mgr)
+_registration_jobs.busy = lambda: any(j.active for j in (_creation_jobs, _plus_creation_jobs, _plus_jobs, _inbox_clear_jobs, _email_delete_jobs))
 _email_bulk_lock = threading.RLock()
 
 _RATE_LIMIT_KW = ["limit","exceeded","maximum","quota","429","too many","try again","unavailable","上限","超过","过多","频繁","rate limit","throttle","blocked"]
@@ -278,7 +281,7 @@ def api_state():
     summary = _account_mgr.get_summary()
     with _lock:
         state = dict(_global_state); state.update(summary)
-        state["creating"] = state["creating"] or _creation_jobs.active
+        state["creating"] = state["creating"] or _creation_jobs.active or _registration_jobs.active
         state["cookies_ok"] = summary["active_accounts"] > 0
         state["alias_count"] = summary["total_aliases"]
         state["alias_active"] = summary["total_active_aliases"]
@@ -596,6 +599,7 @@ def api_bulk_emails():
         return jsonify(ok=False,error='批量操作无效'),400
     try:
         with _email_bulk_lock:
+            if _registration_jobs.active: raise RuntimeError('自动注册轮换正在执行，请等待完成后操作邮箱')
             store = email_storage()
             with store.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
@@ -677,7 +681,7 @@ def _bulk_job(job_id):
     elif entry and entry['kind']=='sync':
         job = _fastai_sync.get_job(job_id)
     else:
-        job = next((job for manager in (_creation_jobs,_plus_creation_jobs,_inbox_clear_jobs,_email_delete_jobs)
+        job = next((job for manager in (_creation_jobs,_plus_creation_jobs,_inbox_clear_jobs,_email_delete_jobs,_registration_jobs)
                     if (job:=manager.get(job_id))),None)
     if job and entry: job = {**job,'kind':entry['kind'],'skipped':entry['skipped'],'total':entry['total']}
     return job
@@ -709,7 +713,7 @@ def api_email_bulk_job(job_id):
 def api_cancel_email_bulk_job(job_id):
     entry = email_storage().read_document('email_bulk_task',job_id)
     if entry and entry['kind']=='sync': return jsonify(ok=_fastai_sync.cancel(job_id))
-    for jobs in (_creation_jobs,_plus_creation_jobs,_inbox_clear_jobs,_email_delete_jobs):
+    for jobs in (_creation_jobs,_plus_creation_jobs,_inbox_clear_jobs,_email_delete_jobs,_registration_jobs):
         if jobs.get(job_id): return jsonify(ok=jobs.cancel(job_id))
     return jsonify(ok=False,error='任务不存在'),404
 
