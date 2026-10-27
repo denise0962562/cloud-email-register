@@ -87,7 +87,37 @@ class AutoPlusAddresses(AutoRegistration):
     target_limit = None
     defaults = {**{key: value for key, value in DEFAULTS.items() if key != "account_ids"},
                 "base_emails": [], "all_sources": True, "count": 10, "interval_mode": "fixed",
-                "interval_minutes": 60, "label": "auto"}
+                "interval_minutes": 60, "label": "auto", "sync_to_fastai": False}
+
+    def __init__(self, *args, fastai_sync=None, **kwargs):
+        self.fastai_sync = fastai_sync
+        super().__init__(*args, **kwargs)
+
+    def task_metadata(self):
+        # 每轮固定提交时的开关，修改配置从下一轮生效。
+        return {'sync_to_fastai': self.config['sync_to_fastai'], 'sync_cursor': 0}
+
+    def tick(self):
+        with self.lock:
+            # 入队和游标均持久化；重启后可继续交接已成功的结果。
+            for task in ([self.current] if self.current else []) + self.history:
+                if not task.get('sync_to_fastai') or task.get('sync_handoff_done') or self.fastai_sync is None:
+                    continue
+                job = self.jobs.get(task['job_id']) or {}
+                events = job.get('events', [])
+                cursor = task.get('sync_cursor', 0)
+                if cursor >= len(events):
+                    if job and job.get('status') != 'running':
+                        task['sync_handoff_done'] = True
+                        self.persist()
+                    continue
+                emails = [r['email'] for r in events[cursor:] if r.get('ok') and r.get('email')]
+                if emails:
+                    self.fastai_sync.enqueue_split(emails, task['job_id'])
+                    self.log('info', f'分裂成功邮箱已交给 FastAI 后台同步：{len(emails)} 个')
+                task['sync_cursor'] = len(events)
+                self.persist()
+            super().tick()
 
     def valid_target(self, target):
         sources = getattr(self, "_validating_sources", None)
@@ -100,6 +130,8 @@ class AutoPlusAddresses(AutoRegistration):
         with self.lock:
             if not isinstance(data, dict):
                 raise ValueError("自动创建配置字段无效")
+            if type(data.get('sync_to_fastai', self.config['sync_to_fastai'])) is not bool:
+                raise ValueError('分裂后同步 FastAI 开关必须为布尔值')
             all_sources = data.get("all_sources", self.config["all_sources"])
             if type(all_sources) is not bool:
                 raise ValueError("全部源地址开关必须为布尔值")

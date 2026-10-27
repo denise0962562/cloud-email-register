@@ -124,13 +124,17 @@ class AutoRegistration:
             self.current = {"job_id": job_id, "started_at": self.clock(), "status": "running",
                             "trigger": "scheduled" if scheduled else "manual",
                             "target": len(ids) * self.config["count"], "logged_results": 0,
-                            "lines": [], "total_created": 0, "total_errors": 0}
+                            "lines": [], "total_created": 0, "total_errors": 0,
+                            **self.task_metadata()}
             if scheduled:
                 self.next_run = None
             self.log("info", f"任务 {job_id[:8]} 开始：{len(ids)} 个{self.target_label}，每个 {self.config['count']} 个")
             self.persist()
             self.wake.set()
             return job_id
+
+    def task_metadata(self):
+        return {}
 
     def tick(self):
         with self.lock:

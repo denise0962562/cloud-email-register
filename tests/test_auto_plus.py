@@ -14,6 +14,40 @@ from storage import Storage
 
 
 class AutoPlusTest(unittest.TestCase):
+    def test_split_sync_default_off_boolean_validation_and_round_snapshot(self):
+        self.assertFalse(self.auto.config['sync_to_fastai'])
+        with self.assertRaises(ValueError):
+            self.auto.configure({'sync_to_fastai': 'true'})
+        sink = self.auto.fastai_sync = Mock()
+        self.auto.configure({'count': 1, 'sync_to_fastai': True, 'item_interval_seconds': 0})
+        key = self.auto.run_now()
+        result = self.wait(key)
+        self.auto.configure({'sync_to_fastai': False})
+        self.auto.tick()
+        sink.enqueue_split.assert_called_once_with([result['events'][0]['email']], key)
+        self.auto.tick()
+        self.auto.tick()
+        self.assertEqual(sink.enqueue_split.call_count, 1)
+        next_key = self.auto.run_now()
+        self.wait(next_key)
+        self.auto.tick()
+        self.assertEqual(sink.enqueue_split.call_count, 1)
+
+    def test_restart_hands_off_only_successes_without_losing_failed_creation_results(self):
+        sink = Mock()
+        self.auto.fastai_sync = sink
+        self.auto.configure({'count': 2, 'sync_to_fastai': True, 'item_interval_seconds': 0})
+        with patch.object(self.jobs, 'create_item', side_effect=[
+                {'ok': True, 'email': 'base+abcd@icloud.com', 'line': 'base+abcd@icloud.com----https://mail/abc'},
+                {'ok': False, 'email': 'base+fail@icloud.com', 'error': '配置失败'}]):
+            key = self.auto.run_now()
+            self.wait(key)
+        restored = AutoPlusAddresses(self.jobs, self.manager, self.path, fastai_sync=sink)
+        restored.tick()
+        sink.enqueue_split.assert_called_once_with(['base+abcd@icloud.com'], key)
+        restored.tick()
+        self.assertEqual(sink.enqueue_split.call_count, 1)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

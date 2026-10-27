@@ -1,5 +1,6 @@
 """Asynchronous, idempotent iCloud-pool imports into gpt-auto-register."""
 import copy
+import hashlib
 import json
 import secrets
 import threading
@@ -149,7 +150,7 @@ class FastAISync:
         with self.lock:
             return self.storage.read_document('fastai_sync_job',key)
 
-    def start(self, scheduled=False, emails=None, all_pending=False, selected_only=False):
+    def start(self, scheduled=False, emails=None, all_pending=False, selected_only=False, trigger=None):
         with self.lock:
             if emails is not None and (not isinstance(emails,list) or not emails or any(not isinstance(e,str) for e in emails)):
                 raise ValueError('邮箱列表必须是非空字符串列表')
@@ -165,12 +166,12 @@ class FastAISync:
             if not all_pending and not selected_only: pending = pending[:self.config['batch_size']]
             self.cancel_event.clear()
             job = {'id':secrets.token_hex(12),'status':'running' if pending else 'completed',
-                   'api_url':endpoint,'include_synced':selected_only or (self.config['include_synced'] and not all_pending),'trigger':'scheduled' if scheduled else 'manual',
+                   'api_url':endpoint,'include_synced':selected_only or (self.config['include_synced'] and not all_pending),'trigger':trigger or ('scheduled' if scheduled else 'manual'),
                    'started_at':self.clock(),'finished_at':None if pending else self.clock(),
                    'total':len(pending),'processed':0,'succeeded':0,'failed':0,
                    'message':'正在同步' if pending else '没有可同步的未同步邮箱',
                    'items':[{'email':r['email'],'status':'pending','error':''} for r in pending]}
-            self._log('info',('自动' if scheduled else '手动')+'任务启动，计划同步 %d 个邮箱' % len(pending))
+            self._log('info',('分裂后同步' if trigger == 'split' else '自动' if scheduled else '手动')+'任务启动，计划同步 %d 个邮箱' % len(pending))
             self.latest = job['id']
             self.active = job['id'] if pending else None
             if scheduled: self.next_run = None
@@ -183,6 +184,68 @@ class FastAISync:
                 self.work_thread = threading.Thread(target=self._run,args=(job,pending,self.config['api_token']),daemon=True)
                 self.work_thread.start()
             return response
+
+    def enqueue_split(self, emails, source_job):
+        """持久化交接成功的分裂邮箱；忙时等待，重复交接不会重复入队。"""
+        with self.lock:
+            endpoint = self.config['api_url']
+            eligible = {r['email']: r for r in self.pending(endpoint)}
+            with self.storage.connect() as db:
+                for email in dict.fromkeys(e.lower() for e in emails):
+                    if email not in eligible:
+                        continue
+                    key = hashlib.sha256((source_job + '\n' + endpoint + '\n' + email).encode()).hexdigest()
+                    entry = {**eligible[email], 'api_url': endpoint, 'source_job': source_job,
+                             'status': 'pending', 'created_at': self.clock()}
+                    db.execute('INSERT OR IGNORE INTO documents(kind,key,data) VALUES (?,?,?)',
+                               ('split_fastai_outbox', key, json.dumps(entry)))
+            self.wake.set()
+
+    def _dispatch_split(self):
+        # 此队列与周期同步共用单一工作线程，不因已有同步任务而漏掉邮箱。
+        with self.storage.connect() as db:
+            entries = [(key, json.loads(data)) for key, data in db.execute(
+                "SELECT key,data FROM documents WHERE kind='split_fastai_outbox' "
+                "AND json_extract(data,'$.status') IN ('pending','submitted') ORDER BY rowid")]
+        records = {}
+        pending = []
+        for key, entry in entries:
+            endpoint = entry['api_url']
+            if endpoint not in records:
+                records[endpoint] = self.records(endpoint)
+            state = records[endpoint].get(entry['email'], {})
+            confirmed = state.get('status') == 'synced' and state.get('inbox_url') == entry['inbox_url']
+            if confirmed:
+                entry['status'] = 'synced'
+            elif entry['status'] == 'submitted':
+                job = self.get_job(entry['job_id']) or {}
+                if job.get('status') == 'running' and self.active == entry['job_id']:
+                    continue
+                entry['status'] = 'failed'
+                self._set_status(entry, {'id': entry['job_id'], 'api_url': endpoint}, 'failed',
+                                 '分裂后同步未完成，请在邮箱列表重试')
+            elif endpoint == self.config['api_url']:
+                pending.append((key, entry))
+                continue
+            else:
+                continue  # 接口切换后不擅自将已排队的邮箱发往另一目标。
+            self.storage.write_document('split_fastai_outbox', entry, key)
+        if self.active or not pending:
+            return
+        eligible = {row['email']: row for row in self.pending()}
+        selected = []
+        for key, entry in pending[:10000]:
+            if entry['email'] not in eligible or eligible[entry['email']]['inbox_url'] != entry['inbox_url']:
+                entry['status'] = 'skipped'
+                self.storage.write_document('split_fastai_outbox', entry, key)
+            else:
+                selected.append((key, entry))
+        if selected:
+            job = self.start(emails=list(dict.fromkeys(e['email'] for _, e in selected)),
+                             selected_only=True, trigger='split')
+            for key, entry in selected:
+                entry.update(status='submitted', job_id=job['id'])
+                self.storage.write_document('split_fastai_outbox', entry, key)
 
     def cancel(self, job_id):
         with self.lock:
@@ -264,13 +327,14 @@ class FastAISync:
                 job['finished_at']=self.clock()
                 self._save_job(job)
                 self.active=None
-                if self.config['enabled'] and (job['trigger']=='scheduled' or job['succeeded']>0 or self.next_run is None):
+                if self.config['enabled'] and job['trigger'] != 'split' and (job['trigger']=='scheduled' or job['succeeded']>0 or self.next_run is None):
                     self.next_run=self.clock()+self.config['interval_minutes']*60
                 self._persist_state()
                 self.wake.set()
 
     def tick(self):
         with self.lock:
+            self._dispatch_split()
             if self.config['enabled'] and self.next_run is not None and self.clock()>=self.next_run and not self.active:
                 self.start(scheduled=True)
 

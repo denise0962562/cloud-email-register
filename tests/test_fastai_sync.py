@@ -18,6 +18,66 @@ def accepted(action='inserted'):
 
 
 class FastAISyncTest(unittest.TestCase):
+    def test_split_queue_waits_for_busy_sync_ignores_global_batch_size_and_scopes_emails(self):
+        for email in ['old@icloud.com', 'one+abcd@icloud.com', 'two+abcd@icloud.com', 'unrelated@icloud.com']:
+            self.alias(email)
+        self.sync.configure({'batch_size': 1, 'api_token': 'private-token'})
+        entered, release = threading.Event(), threading.Event()
+        def blocked(*args, **kwargs):
+            entered.set(); release.wait(2); return accepted()
+        self.http.post.side_effect = blocked
+        prior = self.sync.start(emails=['old@icloud.com'], selected_only=True)
+        self.assertTrue(entered.wait(1))
+        emails = ['one+abcd@icloud.com', 'two+abcd@icloud.com']
+        self.sync.enqueue_split(emails, 'round')
+        self.sync.enqueue_split(emails, 'round')
+        self.sync.tick()
+        self.assertEqual(self.sync.active, prior['id'])
+        release.set(); self.wait(prior)
+        self.http.post.side_effect = None
+        self.sync.tick()
+        result = self.wait({'id': self.sync.latest})
+        self.assertEqual(result['trigger'], 'split')
+        self.assertEqual(result['succeeded'], 2)
+        self.assertEqual({r['email'] for r in result['items']}, set(emails))
+        self.sync.tick()
+        self.assertEqual(self.http.post.call_count, 3)
+        self.assertNotIn('unrelated@icloud.com', self.sync.records())
+        self.assertEqual(self.http.post.call_args.kwargs['headers'], {'Authorization': 'Bearer private-token'})
+        self.assertFalse(self.sync.config['enabled'])
+
+    def test_split_outbox_survives_restart_and_auth_failure_is_not_automatically_retried(self):
+        self.alias('one+abcd@icloud.com')
+        self.sync.enqueue_split(['one+abcd@icloud.com'], 'round')
+        restored = FastAISync(self.db, http_factory=lambda: self.http)
+        self.http.post.return_value = Mock(status_code=401)
+        restored.tick()
+        self.sync = restored
+        self.wait({'id': restored.latest})
+        restored.tick()
+        restored.tick()
+        self.assertEqual(self.http.post.call_count, 1)
+        self.assertEqual(restored.records()['one+abcd@icloud.com']['status'], 'failed')
+        with self.db.connect() as db:
+            import json
+            entry = json.loads(db.execute("SELECT data FROM documents WHERE kind='split_fastai_outbox'").fetchone()[0])
+        self.assertEqual(entry['status'], 'failed')
+
+    def test_queued_split_keeps_destination_and_does_not_reset_regular_sync_deadline(self):
+        self.alias('one+abcd@icloud.com')
+        original = self.sync.config['api_url']
+        self.sync.configure({'enabled': True})
+        deadline = self.sync.next_run
+        self.sync.enqueue_split(['one+abcd@icloud.com'], 'round')
+        self.sync.configure({'api_url': 'https://other.example/api/import'})
+        self.sync.tick()
+        self.http.post.assert_not_called()
+        self.sync.configure({'api_url': original})
+        self.sync.tick()
+        self.wait({'id': self.sync.latest})
+        self.assertEqual(self.sync.next_run, deadline)
+        self.assertEqual(self.http.post.call_args.args[0], original)
+
     def setUp(self):
         self.folder=tempfile.TemporaryDirectory();self.addCleanup(self.folder.cleanup)
         auth = AuthStore(Path(self.folder.name)/'auth.sqlite3')
