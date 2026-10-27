@@ -137,7 +137,7 @@ class AutoRegistration:
             if self.current:
                 job = self.jobs.get(self.current["job_id"])
                 if job:
-                    results = [row for rows in job["results"].values() for row in rows]
+                    results = job.get("events", [row for rows in job["results"].values() for row in rows])
                     new = results[self.current["logged_results"]:]
                     for result in new:
                         self.log("success" if result.get("ok") else "error",

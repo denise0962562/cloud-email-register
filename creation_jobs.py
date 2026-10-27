@@ -10,6 +10,7 @@ class CreationJobs:
     # 不同创建任务使用独立记录，但复用串行执行、取消和结果持久化。
     document_kind = "creation_job"
     target_label = "账号"
+    round_robin = False
     def __init__(self, manager, on_result=None):
         self.manager = manager
         candidate = getattr(manager, "storage", None)
@@ -40,7 +41,7 @@ class CreationJobs:
             if self._active:
                 raise RuntimeError("已有创建任务运行中，请等待完成")
             job_id = secrets.token_hex(12)
-            self._jobs[job_id] = {"id": job_id, "status": "running", "results": {}, "lines": [],
+            self._jobs[job_id] = {"id": job_id, "status": "running", "results": {}, "events": [], "lines": [],
                                   "total_created": 0, "total_errors": 0, "progress": "准备账号配置"}
             self._persist(job_id)
             self._active = job_id
@@ -69,6 +70,7 @@ class CreationJobs:
         with self._lock:
             job = self._jobs[job_id]
             job["results"].setdefault(account_id, []).append(result)
+            job["events"].append(result)
             if result.get("ok"):
                 job["lines"].append(result["line"])
                 job["total_created"] += 1
@@ -78,40 +80,50 @@ class CreationJobs:
         if self.on_result:
             self.on_result(result)
 
+    def _work_items(self, account_ids, count, repair):
+        if self.round_robin and repair is None:
+            for ordinal in range(count):
+                for index, account_id in enumerate(account_ids):
+                    yield index, account_id, ordinal, ordinal, count
+        else:
+            for index, account_id in enumerate(account_ids):
+                targets = repair.get(account_id, []) if repair is not None else range(count)
+                for ordinal, target in enumerate(targets):
+                    yield index, account_id, ordinal, target, len(targets)
+
     def _run(self, job_id, account_ids, count, label, interval, repair, item_interval=0):
         cancel = self._cancel_events[job_id]
         try:
-            for index, account_id in enumerate(account_ids):
+            failed, previous = set(), None
+            for index, account_id, ordinal, target, total in self._work_items(account_ids, count, repair):
+                if account_id in failed: continue
+                if previous is not None:
+                    gap = item_interval if self.round_robin or previous == account_id else interval
+                    if gap: cancel.wait(gap)
                 if cancel.is_set(): break
-                targets = repair.get(account_id, []) if repair is not None else range(count)
-                for ordinal, target in enumerate(targets):
-                    if cancel.is_set(): break
-                    with self._lock:
-                        action = "补齐收件地址" if repair is not None else "创建并配置收件"
-                        self._jobs[job_id]["progress"] = f"{self.target_label} {index + 1}/{len(account_ids)}，邮箱 {ordinal + 1}/{len(targets)}：{action}"
-                        self._persist(job_id)
-                    try:
-                        if repair is not None:
-                            result = self.manager.setup_alias_inbox(account_id, target)
-                        else:
-                            result = self.create_item(account_id, label)
-                    except Exception as error:
-                        message = str(error)[:250]
-                        status = re.search(r"HTTP (401|403|421)\b", message)
-                        if status:
-                            message = f"iCloud 会话不可用（HTTP {status.group(1)}），请更新该账号 Cookie 后重新补齐"
-                        result = {"ok": False, "account_id": account_id, "error": message}
-                        if repair is not None:
-                            result["email"] = target
-                            from inbox_links import update_link
-                            update_link(target, {"last_error": message})
-                    self._append(job_id, account_id, result)
-                    if not result.get("ok") and repair is None:
-                        break
-                    if ordinal < len(targets) - 1 and item_interval:
-                        cancel.wait(item_interval)
-                if index < len(account_ids) - 1 and interval:
-                    cancel.wait(interval)
+                with self._lock:
+                    action = "补齐收件地址" if repair is not None else "创建并配置收件"
+                    self._jobs[job_id]["progress"] = f"{self.target_label} {index + 1}/{len(account_ids)}，邮箱 {ordinal + 1}/{total}：{action}"
+                    self._persist(job_id)
+                try:
+                    if repair is not None:
+                        result = self.manager.setup_alias_inbox(account_id, target)
+                    else:
+                        result = self.create_item(account_id, label)
+                except Exception as error:
+                    message = str(error)[:250]
+                    status = re.search(r"HTTP (401|403|421)\b", message)
+                    if status:
+                        message = f"iCloud 会话不可用（HTTP {status.group(1)}），请更新该账号 Cookie 后重新补齐"
+                    result = {"ok": False, "account_id": account_id, "error": message}
+                    if repair is not None:
+                        result["email"] = target
+                        from inbox_links import update_link
+                        update_link(target, {"last_error": message})
+                self._append(job_id, account_id, result)
+                previous = account_id
+                if not result.get("ok") and repair is None:
+                    failed.add(account_id)
             with self._lock:
                 job = self._jobs[job_id]
                 job["status"] = "cancelled" if cancel.is_set() else "completed"

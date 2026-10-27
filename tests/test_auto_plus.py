@@ -120,10 +120,71 @@ class AutoPlusTest(unittest.TestCase):
     def test_invalid_configuration_does_not_change_schedule(self):
         self.auto.configure({'base_emails':['base@icloud.com'], 'enabled':True})
         before = self.auto.storage.read_document('auto_plus')
-        for data in [{'base_emails':['unknown@icloud.com']}, {'count':201}, {'count':True},
+        for data in [{'all_sources':False, 'base_emails':['unknown@icloud.com']}, {'count':201}, {'count':True},
                      {'label':'中文'}, {'label':'x'*11}, {'interval_minutes':0}]:
             with self.assertRaises(ValueError): self.auto.configure(data)
             self.assertEqual(self.auto.storage.read_document('auto_plus'), before)
+
+    def add_source(self, email):
+        self.records[email] = {**self.records['base@icloud.com'], 'email': email}
+
+    def test_default_all_sources_ignores_individual_selection_and_includes_more_than_twenty(self):
+        for index in range(25):
+            self.add_source(f'source{index}@icloud.com')
+        self.records['incomplete@icloud.com'] = {'email':'incomplete@icloud.com','account_id':'owner'}
+        self.assertTrue(self.auto.snapshot()['config']['all_sources'])
+        self.auto.configure({'base_emails':['unknown@icloud.com'], 'count':1, 'item_interval_seconds':0})
+        self.assertEqual(len(self.auto.config['base_emails']),26)
+        key = self.auto.run_now()
+        result = self.wait(key)
+        self.assertEqual(result['total_created'],26)
+        self.auto.tick()
+        self.add_source('newly-ready@icloud.com')
+        key = self.auto.run_now()
+        self.assertEqual(self.auto.current['target'],27)
+        self.assertEqual(self.wait(key)['total_created'],27)
+
+    def test_manual_mode_only_uses_selected_sources(self):
+        self.add_source('other@icloud.com')
+        self.auto.configure({'all_sources':False,'base_emails':['base@icloud.com'],
+                             'count':1,'item_interval_seconds':0})
+        result = self.wait(self.auto.run_now())
+        self.assertEqual(list(result['results']), ['base@icloud.com'])
+
+    def test_round_robin_order_is_preserved_in_records_events_and_export(self):
+        bases = ['base@icloud.com','second@icloud.com','third@icloud.com']
+        for base in bases[1:]: self.add_source(base)
+        result = self.wait(self.jobs.start(bases,3,'order',item_interval=0))
+        expected = bases * 3
+        self.assertEqual([row['base_email'] for row in result['events']], expected)
+        def source(email): return email.split('+')[0]+'@icloud.com'
+        self.assertEqual([source(row['email']) for row in self.store.emails()], expected)
+        self.assertEqual([source(line.split('----')[0]) for line in result['lines']], expected)
+
+    def test_failed_source_stops_its_round_and_other_sources_continue_interleaved(self):
+        self.add_source('second@icloud.com'); self.add_source('third@icloud.com')
+        original = self.jobs.create_item
+        calls = []
+        def create(base,label):
+            calls.append(base)
+            return {'ok':False,'error':'test failure'} if base=='base@icloud.com' else original(base,label)
+        with patch.object(self.jobs,'create_item',side_effect=create):
+            result = self.wait(self.jobs.start(list(self.jobs.sources()),3,'errors',item_interval=0))
+        self.assertEqual(calls,['base@icloud.com']+['second@icloud.com','third@icloud.com']*3)
+        self.assertEqual((result['total_created'],result['total_errors']),(6,1))
+
+    def test_interleaved_progress_logs_each_result_once_in_creation_order(self):
+        with patch.object(self.jobs,'start',return_value='interleaved'):
+            self.auto.run_now()
+        a1,b1,a2 = [{'ok':True,'email':email} for email in ['a+1@icloud.com','b+1@icloud.com','a+2@icloud.com']]
+        job={'status':'running','results':{'a':[a1],'b':[b1]},'events':[a1,b1],
+             'lines':[], 'total_created':2, 'total_errors':0}
+        with patch.object(self.jobs,'get',side_effect=lambda _:copy.deepcopy(job)):
+            self.auto.tick()
+            job['results']['a'].append(a2);job['events'].append(a2);job['total_created']=3
+            self.auto.tick()
+        messages=[row['message'] for row in self.auto.logs if row['level']=='success']
+        self.assertEqual([msg.split(' ')[0] for msg in messages],[a1['email'],b1['email'],a2['email']])
 
     def test_manual_failure_keeps_deadline_and_shutdown_cancels_remaining_items(self):
         self.auto.configure({'base_emails':['base@icloud.com'], 'enabled':True, 'item_interval_seconds':0})

@@ -1,1 +1,3 @@
 #accounts{max-height:250px;overflow:auto;scrollbar-gutter:stable}#accounts label{overflow-wrap:anywhere}#accounts [hidden]{display:none!important}#sourceSearch{width:100%}.account-list span{min-width:0}.account-list em{flex-shrink:0}@media(max-width:600px){.field-row{grid-template-columns:1fr}.overview>div{min-width:0}.panel-title{flex-wrap:wrap}}
+
+.all-sources{display:flex;align-items:center;gap:8px;margin-bottom:12px}.all-sources input{width:auto}#accounts input:disabled{opacity:.6}#accounts label:has(input:disabled){opacity:.7}

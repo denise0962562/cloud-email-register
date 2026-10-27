@@ -12,6 +12,7 @@ from plus_addressing import plus_address, setup_shared_inbox, safe_error
 class PlusCreationJobs(CreationJobs):
     document_kind = "plus_creation_job"
     target_label = "源地址"
+    round_robin = True
 
     def sources(self):
         return {email: row for email, row in load_links().items()
@@ -19,9 +20,9 @@ class PlusCreationJobs(CreationJobs):
                 and row.get("account_id") in self.manager.accounts}
 
     def start(self, bases, count=10, label="auto", *, item_interval=3):
-        if (not isinstance(bases, list) or not 1 <= len(bases) <= 20
+        if (not isinstance(bases, list) or not bases
                 or any(not isinstance(x, str) for x in bases) or len(set(bases)) != len(bases)):
-            raise ValueError("请选择 1–20 个不同的源地址")
+            raise ValueError("请选择不同的已配置收件源地址")
         sources = self.sources()
         if any(base not in sources for base in bases):
             raise ValueError("源地址不存在、所属账号已移除或未配置收件")
@@ -83,13 +84,46 @@ class AutoPlusAddresses(AutoRegistration):
     target_key = "base_emails"
     target_label = "源地址"
     count_limit = 200
-    target_limit = 20
+    target_limit = None
     defaults = {**{key: value for key, value in DEFAULTS.items() if key != "account_ids"},
-                "base_emails": [], "count": 10, "interval_mode": "fixed",
+                "base_emails": [], "all_sources": True, "count": 10, "interval_mode": "fixed",
                 "interval_minutes": 60, "label": "auto"}
 
     def valid_target(self, target):
-        return target in self.jobs.sources()
+        sources = getattr(self, "_validating_sources", None)
+        return target in (sources if sources is not None else self.jobs.sources())
 
     def validate_label(self, label):
         validate_prefix(label)
+
+    def configure(self, data):
+        with self.lock:
+            if not isinstance(data, dict):
+                raise ValueError("自动创建配置字段无效")
+            all_sources = data.get("all_sources", self.config["all_sources"])
+            if type(all_sources) is not bool:
+                raise ValueError("全部源地址开关必须为布尔值")
+            sources = self.jobs.sources()
+            if all_sources:
+                data = {**data, "base_emails": list(sources)}
+            self._validating_sources = sources
+            try:
+                return super().configure(data)
+            finally:
+                del self._validating_sources
+
+    def run_now(self, config=None, *, scheduled=False):
+        with self.lock:
+            if self.current or self.jobs.active:
+                raise RuntimeError("已有任务运行，请等待完成")
+            # Resolve all eligible sources anew for every round, including ones
+            # configured after this schedule was saved.
+            self.configure(config if config is not None else {})
+            return super().run_now(scheduled=scheduled)
+
+    def snapshot(self):
+        with self.lock:
+            data = super().snapshot()
+            if self.config["all_sources"]:
+                data["config"]["base_emails"] = list(self.jobs.sources())
+            return data
