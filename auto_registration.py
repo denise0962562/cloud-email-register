@@ -153,6 +153,23 @@ class AutoRegistration:
     def task_metadata(self):
         return {}
 
+    def result_message(self, result, owner=None):
+        """逐项日志附带 Apple 主账号邮箱；不改动导出的邮箱和收件链接格式。"""
+        account_id = result.get('account_id') or owner
+        if account_id and hasattr(type(self.jobs), 'group_key'):
+            account_id = self.jobs.group_key(account_id)
+        account = self.manager.get_account(account_id) if account_id else None
+        account = account if isinstance(account, dict) else {}
+        identity = result.get('account_email') or account.get('real_email') or account.get('icloud_email')
+        # 账号移除或尚未识别邮箱时保留内部账号标识，不将分裂源地址误标为主账号。
+        if not isinstance(identity, str) or not identity:
+            identity = account.get('name') or (account_id if isinstance(account_id, str) and '@' not in account_id else None)
+        if result.get('ok'):
+            message = result.get('message') or ((result.get('email') or '') + ' 创建及收件配置完成')
+        else:
+            message = ('已跳过：' if result.get('skipped') else '单个邮箱失败：') + str(result.get('error', '配置失败'))[:240]
+        return ('[主账号：' + identity + '] ' if identity else '') + message
+
     def tick(self):
         with self.lock:
             if self.current:
@@ -161,9 +178,12 @@ class AutoRegistration:
                     results = job.get("events", [row for rows in job["results"].values() for row in rows])
                     new = results[self.current["logged_results"]:]
                     for result in new:
+                        # 兼容旧任务只有 results 分组、逐项结果未保存 account_id 的格式。
+                        owner = None
+                        if not result.get('account_id'):
+                            owner = next((key for key, rows in job.get('results', {}).items() if result in rows), None)
                         self.log("success" if result.get("ok") else 'warn' if result.get('skipped') else "error",
-                                 (result.get("message") or (result.get("email", "") + " 创建及收件配置完成")) if result.get("ok")
-                                 else ('已跳过：' if result.get('skipped') else '单个邮箱失败：') + str(result.get("error", "配置失败"))[:240])
+                                 self.result_message(result, owner))
                     self.current.update(logged_results=len(results), lines=job.get("lines", []),
                                         total_created=job.get("total_created", 0), total_errors=job.get("total_errors", 0),
                                         total_skipped=job.get('total_skipped', 0),

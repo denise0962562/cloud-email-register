@@ -8,6 +8,7 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 import requests
 from inbox_links import is_ready
+from email_catalog import stamp
 
 DEFAULTS = {'api_url': 'http://127.0.0.1:8766/api/import', 'enabled': False, 'interval_minutes': 60, 'batch_size': 50, 'include_synced': False, 'api_token': ''}
 
@@ -42,6 +43,8 @@ class FastAISync:
         self.cancel_event = threading.Event()
         state = storage.read_document('fastai_sync_state') or {}
         self.config = {**DEFAULTS, **state.get('config', {})}
+        # 发送账号固定只发送未同步成功的记录，兼容旧配置但不启用重复发送。
+        self.config['include_synced'] = False
         self.next_run = state.get('next_run')
         self.active = state.get('active')
         self.latest = state.get('latest')
@@ -92,11 +95,15 @@ class FastAISync:
 
     def pending(self, api_url=None, include_synced=False):
         links, states, rows = self.storage.load_links(), self.records(api_url), []
-        seen = set()
-        for source in self.storage.emails():
+        unique = {}
+        for index, source in enumerate(self.storage.emails()):
+            unique[source['email'].lower()] = (index, source)
+        # 先按注册时间从早到晚排列，再截取本轮数量；相同时间按写入顺序，缺失时间排最后。
+        ordered = sorted(unique.values(), key=lambda item: (
+            stamp(item[1].get('created_at')) is None,
+            stamp(item[1].get('created_at')) or 0, item[0]))
+        for _, source in ordered:
             email = source['email'].lower()
-            if email in seen: continue
-            seen.add(email)
             link, record = links.get(email,{}), states.get(email,{})
             if not is_ready(link): continue
             url = link['inbox_url']
@@ -116,7 +123,7 @@ class FastAISync:
             public_config['api_token_configured'] = bool(self.config['api_token'])
             return {'history':history,'logs':copy.deepcopy(self.logs),'current':job if self.active else None,'config':public_config,'next_run':self.next_run,
                     'server_time':self.clock(),'pending':len(self.pending()),
-                    'eligible':len(self.pending(include_synced=self.config['include_synced'])),'job':job}
+                    'eligible':len(self.pending()),'job':job}
 
     def configure(self, data):
         with self.lock:
@@ -138,6 +145,7 @@ class FastAISync:
             if type(config['batch_size']) is not int or not 1 <= config['batch_size'] <= 10000:
                 raise ValueError('每轮同步数量应为 1–10000 的整数')
             if type(config['include_synced']) is not bool: raise ValueError('包含已同步开关必须为布尔值')
+            config['include_synced'] = False
             self.config = config
             self._log('info','配置已保存：自动同步%s，每 %d 分钟，每轮最多 %d 个' % ('开启' if config['enabled'] else '关闭',config['interval_minutes'],config['batch_size']))
             if not config['enabled']: self.next_run = None
@@ -159,14 +167,14 @@ class FastAISync:
                 if selected_only: raise RuntimeError('已有 FastAI 同步任务运行中，请等待完成')
                 return self.get_job(self.active)
             endpoint = self.config['api_url']
-            pending = self.pending(endpoint,include_synced=selected_only or (self.config['include_synced'] and not all_pending))
+            pending = self.pending(endpoint,include_synced=selected_only)
             if emails is not None:
                 selected={e.lower() for e in emails}
                 pending=[row for row in pending if row['email'] in selected]
             if not all_pending and not selected_only: pending = pending[:self.config['batch_size']]
             self.cancel_event.clear()
             job = {'id':secrets.token_hex(12),'status':'running' if pending else 'completed',
-                   'api_url':endpoint,'include_synced':selected_only or (self.config['include_synced'] and not all_pending),'trigger':trigger or ('scheduled' if scheduled else 'manual'),
+                   'api_url':endpoint,'include_synced':selected_only,'trigger':trigger or ('scheduled' if scheduled else 'manual'),
                    'started_at':self.clock(),'finished_at':None if pending else self.clock(),
                    'total':len(pending),'processed':0,'succeeded':0,'failed':0,
                    'message':'正在同步' if pending else '没有可同步的未同步邮箱',

@@ -31,6 +31,26 @@ class AutoRegistrationTest(unittest.TestCase):
         return {"status": "running", "results": {}, "lines": [], "total_created": 0,
                 "total_errors": 0, "progress": "处理中", **kwargs}
 
+    def test_per_item_logs_include_primary_email_for_success_failure_and_skip(self):
+        self.manager.get_account.side_effect=lambda key: {'id':key,'real_email':'owner@gmail.com'} if key=='a1' else None
+        for result in [
+                {'ok':True,'message':'alias@icloud.com 源邮箱、规则和收件配置已删除'},
+                {'ok':True,'email':'alias+new@icloud.com'},
+                {'ok':False,'error':'删除失败'},
+                {'ok':False,'skipped':True,'error':'Cookie 已失效'}]:
+            message=self.auto.result_message({**result,'account_id':'a1'})
+            self.assertTrue(message.startswith('[主账号：owner@gmail.com] '),message)
+        self.assertIn('删除失败',self.auto.result_message({'ok':False,'error':'删除失败'},'a1'))
+
+    def test_different_primary_accounts_have_distinct_labels_and_exports_stay_unchanged(self):
+        self.manager.get_account.side_effect=lambda key: {'real_email':key+'@example.com'}
+        first=self.auto.result_message({'ok':True,'account_id':'a1','email':'one@icloud.com'})
+        second=self.auto.result_message({'ok':True,'account_id':'a2','email':'two@icloud.com'})
+        self.assertIn('[主账号：a1@example.com]',first)
+        self.assertIn('[主账号：a2@example.com]',second)
+        self.assertIn('one@icloud.com',first)
+        self.assertIn('two@icloud.com',second)
+
     def test_fixed_interval_schedules_without_creating_during_http_config(self):
         data = self.enable(interval_mode="fixed", interval_minutes=60)
         self.assertEqual(data["remaining_seconds"], 3600)

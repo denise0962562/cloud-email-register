@@ -225,19 +225,33 @@ class FastAISyncTest(unittest.TestCase):
             self.assertEqual(self.wait(result.json['job'])['total'],2)
             self.assertEqual(client.post('/api/fastai-sync/run',json={'all':'yes'}).status_code,400)
 
-    def test_include_synced_switch_defaults_off_and_persists(self):
+    def test_sender_never_resends_confirmed_records_even_with_legacy_switch(self):
         self.alias();self.wait(self.sync.start())
         self.assertFalse(self.sync.config['include_synced'])
         self.assertEqual(self.wait(self.sync.start())['total'],0)
         self.sync.configure({'include_synced':True})
-        self.assertEqual(self.sync.snapshot()['eligible'],1)
-        self.assertEqual(self.sync.snapshot()['pending'],0)
-        self.assertTrue(FastAISync(self.db).config['include_synced'])
-        self.assertEqual(self.wait(self.sync.start())['succeeded'],1)
-        self.assertEqual(self.wait(self.sync.start(all_pending=True))['total'],0)
-        self.sync.configure({'include_synced':False})
+        self.assertEqual(self.sync.snapshot()['eligible'],0)
+        self.assertFalse(FastAISync(self.db).config['include_synced'])
         self.assertEqual(self.wait(self.sync.start())['total'],0)
-        with self.assertRaises(ValueError): self.sync.configure({'include_synced':'false'})
+        self.assertEqual(self.wait(self.sync.start(all_pending=True))['total'],0)
+        with self.assertRaises(ValueError):self.sync.configure({'include_synced':'false'})
+
+    def test_oldest_registration_first_before_batch_limit_for_sources_and_split_rows(self):
+        for email in ['new@icloud.com','old+tag@icloud.com','old@icloud.com','missing@icloud.com','middle@icloud.com']:
+            self.alias(email)
+        with self.db.connect() as db:
+            for email, created in [('new@icloud.com','2026-10-28T00:00:00Z'),
+                                    ('old+tag@icloud.com','2026-01-02T00:00:00Z'),
+                                    ('old@icloud.com','2025-01-01T00:00:00Z'),
+                                    ('middle@icloud.com','1769904000000'),('missing@icloud.com','')]:
+                db.execute('UPDATE email_records SET created_at=? WHERE email=?',(created,email))
+        self.sync.configure({'batch_size':2})
+        first=self.wait(self.sync.start())
+        self.assertEqual([item['email'] for item in first['items']],['old@icloud.com','old+tag@icloud.com'])
+        second=self.wait(self.sync.start())
+        self.assertEqual([item['email'] for item in second['items']],['middle@icloud.com','new@icloud.com'])
+        third=self.wait(self.sync.start())
+        self.assertEqual([item['email'] for item in third['items']],['missing@icloud.com'])
 
     def test_failed_resend_retains_previous_confirmation(self):
         self.alias();first=self.wait(self.sync.start())
@@ -245,7 +259,7 @@ class FastAISyncTest(unittest.TestCase):
         self.sync.configure({'include_synced':True})
         self.http.post.side_effect=requests.Timeout()
         self.now+=5
-        job=self.wait(self.sync.start())
+        job=self.wait(self.sync.start(emails=['one@icloud.com'],selected_only=True))
         self.assertEqual(job['failed'],1)
         self.assertEqual(self.sync.records()['one@icloud.com'],previous)
         self.assertEqual(self.sync.snapshot()['pending'],0)

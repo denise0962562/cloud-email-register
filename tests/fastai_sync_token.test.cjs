@@ -66,3 +66,13 @@ test('邮箱列表配置弹窗也支持设置、保留和清除 Token', async ()
     assert.equal(E('fsApiToken').value, '');
   }
 });
+
+test('发送页面固定提交只发送未同步记录，页面不再提供重复发送开关',async()=>{
+ const p=panel();await new Promise(setImmediate);
+ await p.element('configForm').submit({preventDefault(){}});
+ const body=JSON.parse(p.calls.find(call=>call.options?.method==='POST').options.body);
+ assert.equal(body.include_synced,false);
+ const html=fs.readFileSync('static/fastai_sync_panel.html','utf8');
+ assert.ok(!html.includes('id="includeSynced"'));
+ assert.ok(html.includes('按注册时间从早到晚'));
+});

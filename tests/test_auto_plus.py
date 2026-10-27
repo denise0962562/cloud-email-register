@@ -319,7 +319,7 @@ class AutoPlusTest(unittest.TestCase):
             job['results']['a'].append(a2);job['events'].append(a2);job['total_created']=3
             self.auto.tick()
         messages=[row['message'] for row in self.auto.logs if row['level']=='success']
-        self.assertEqual([msg.split(' ')[0] for msg in messages],[a1['email'],b1['email'],a2['email']])
+        self.assertEqual([msg.split('] ',1)[-1].split(' ')[0] for msg in messages],[a1['email'],b1['email'],a2['email']])
 
     def test_manual_failure_keeps_deadline_and_shutdown_cancels_remaining_items(self):
         self.auto.configure({'base_emails':['base@icloud.com'], 'enabled':True, 'item_interval_seconds':0})
