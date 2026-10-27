@@ -17,15 +17,17 @@ DEFAULTS = {"enabled": False, "account_ids": [], "count": 5, "interval_mode": "r
 
 class AutoRegistration:
     # 调度、历史和下载状态共用同一实现，具体任务只定义目标与配置约束。
-    defaults = {**DEFAULTS, **ROTATION_DEFAULTS}
+    defaults = {**DEFAULTS, **ROTATION_DEFAULTS, "sync_to_fastai": False}
+    sync_on_completion = True
     document_kind = "auto"
     target_key = "account_ids"
     target_label = "账号"
     count_limit = 20
     target_limit = None
 
-    def __init__(self, jobs, manager, path, *, clock=time.time, randint=random.randint):
+    def __init__(self, jobs, manager, path, *, clock=time.time, randint=random.randint, fastai_sync=None):
         self.jobs, self.manager, self.path = jobs, manager, Path(path)
+        self.fastai_sync = fastai_sync
         self.clock, self.randint = clock, randint
         self.lock = threading.RLock()
         self.wake, self.stop_event = threading.Event(), threading.Event()
@@ -85,6 +87,8 @@ class AutoRegistration:
                                        ('hourly_create_limit', 1, 50), ('quota_window_minutes', 1, 1440)):
                     if type(config[key]) is not int or not low <= config[key] <= high:
                         raise ValueError(f'{key} 必须为 {low} 到 {high} 的整数')
+            if "sync_to_fastai" in self.defaults and type(config["sync_to_fastai"]) is not bool:
+                raise ValueError("自动发送 FastAI 开关必须为布尔值")
             if type(config["enabled"]) is not bool: raise ValueError("开关必须为布尔值")
             ids = config[self.target_key]
             # 已移除的目标不能阻止用户关闭调度和取消当前任务。
@@ -151,7 +155,8 @@ class AutoRegistration:
             return job_id
 
     def task_metadata(self):
-        return {}
+        # 固定本轮开关，运行期间保存设置只影响下一轮。
+        return {"sync_to_fastai": self.config["sync_to_fastai"]}
 
     def result_message(self, result, owner=None):
         """逐项日志附带 Apple 主账号邮箱；不改动导出的邮箱和收件链接格式。"""
@@ -170,8 +175,51 @@ class AutoRegistration:
             message = ('已跳过：' if result.get('skipped') else '单个邮箱失败：') + str(result.get('error', '配置失败'))[:240]
         return ('[主账号：' + identity + '] ' if identity else '') + message
 
+    def reconcile_fastai(self):
+        """整轮结束后持久化交接，持续回写异步发送结果，重启不重复发送。"""
+        if not self.sync_on_completion or self.fastai_sync is None:
+            return
+        changed = False
+        for task in self.history:
+            if not task.get('sync_to_fastai') or task.get('sync_results_done'):
+                continue
+            if not task.get('sync_handoff_done'):
+                job = self.jobs.get(task['job_id']) or {}
+                events = job.get('events', [])
+                # 仅发送新建且收件配置成功的地址，绝不交接删除事件。
+                emails = [r['email'] for r in events if r.get('ok') and r.get('email')
+                          and r.get('action') in ('create_source', 'create_split')]
+                self.fastai_sync.enqueue_registration(emails, task['job_id'])
+                task['sync_handoff_done'] = True
+                task['sync_owners'] = {r['email'].lower(): r.get('account_id') for r in events
+                                       if r.get('email') and r.get('account_id')}
+                self.log('info', f"本轮注册结束，已交给 FastAI 后台发送；候选 {len(set(emails))} 个，已发送或未就绪的邮箱自动跳过")
+                changed = True
+            entries = self.fastai_sync.handoff_status(task['job_id'])
+            logged = task.setdefault('sync_logged', [])
+            for entry in entries:
+                if entry['status'] not in ('synced', 'failed', 'skipped') or entry['email'] in logged:
+                    continue
+                status = entry['status']
+                message = entry['email'] + ' FastAI 发送' + {'synced': '成功', 'failed': '失败', 'skipped': '已跳过'}[status]
+                if entry.get('error'):
+                    message += '：' + entry['error'][:240]
+                self.log('error' if status == 'failed' else 'success' if status == 'synced' else 'warn',
+                         self.result_message({'ok': True, 'message': message,
+                                              'account_id': task.get('sync_owners', {}).get(entry['email'])}))
+                logged.append(entry['email'])
+                changed = True
+            if all(e['status'] in ('synced', 'failed', 'skipped') for e in entries):
+                counts = {s: sum(e['status'] == s for e in entries) for s in ('synced', 'failed', 'skipped')}
+                self.log('info', f"本轮 FastAI 发送结束：成功 {counts['synced']} 个，失败 {counts['failed']} 个，队列跳过 {counts['skipped']} 个")
+                task['sync_results_done'] = True
+                changed = True
+        if changed:
+            self.persist()
+
     def tick(self):
         with self.lock:
+            self.reconcile_fastai()
             if self.current:
                 job = self.jobs.get(self.current["job_id"])
                 if job:

@@ -36,12 +36,15 @@ test('disabling all sources restores manual selection without affecting native r
   assert.ok(!Object.hasOwn(native.context.configFromForm(),'all_sources'));
 });
 
- test('分裂后同步开关随配置保存，普通自动注册不提交此字段', () => {
+ test('注册和分裂页面均保存独立的 FastAI 开关', () => {
   const {fields,context} = setup();
   assert.equal(context.configFromForm().sync_to_fastai,false);
   fields.syncToFastai.checked=true;
   assert.equal(context.configFromForm().sync_to_fastai,true);
-  assert.ok(!Object.hasOwn(setup(false).context.configFromForm(),'sync_to_fastai'));
+  const native=setup(false);
+  assert.equal(native.context.configFromForm().sync_to_fastai,false);
+  native.fields.syncToFastai.checked=true;
+  assert.equal(native.context.configFromForm().sync_to_fastai,true);
  });
 
 test('整批数量直接提交，不再乘以源地址数，普通注册维持原数量字段',()=>{

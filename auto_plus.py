@@ -168,9 +168,11 @@ class AutoPlusAddresses(AutoRegistration):
                 "base_emails": [], "all_sources": True, "count": 10, "interval_mode": "fixed",
                 "interval_minutes": 60, "label": "auto", "sync_to_fastai": False, "batch_total": None}
 
+    sync_on_completion = False
+
     def __init__(self, *args, fastai_sync=None, **kwargs):
         self.fastai_sync = fastai_sync
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, fastai_sync=fastai_sync, **kwargs)
 
     def target_size(self, ids):
         return self.config['batch_total'] if self.config['batch_total'] is not None else super().target_size(ids)

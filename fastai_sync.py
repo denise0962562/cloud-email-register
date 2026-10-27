@@ -179,7 +179,7 @@ class FastAISync:
                    'total':len(pending),'processed':0,'succeeded':0,'failed':0,
                    'message':'正在同步' if pending else '没有可同步的未同步邮箱',
                    'items':[{'email':r['email'],'status':'pending','error':''} for r in pending]}
-            self._log('info',('分裂后同步' if trigger == 'split' else '自动' if scheduled else '手动')+'任务启动，计划同步 %d 个邮箱' % len(pending))
+            self._log('info',('注册后同步' if trigger == 'registration' else '分裂后同步' if trigger == 'split' else '自动' if scheduled else '手动')+'任务启动，计划同步 %d 个邮箱' % len(pending))
             self.latest = job['id']
             self.active = job['id'] if pending else None
             if scheduled: self.next_run = None
@@ -193,7 +193,24 @@ class FastAISync:
                 self.work_thread.start()
             return response
 
-    def enqueue_split(self, emails, source_job):
+    def enqueue_registration(self, emails, source_job):
+        return self.enqueue_split(emails, source_job, trigger='registration')
+
+    def handoff_status(self, source_job):
+        """只返回该轮交接的邮箱状态，供注册日志查询，不暴露配置凭据。"""
+        with self.lock, self.storage.connect() as db:
+            entries = [json.loads(row[0]) for row in db.execute(
+                "SELECT data FROM documents WHERE kind='split_fastai_outbox' AND json_extract(data,'$.source_job')=?",
+                (source_job,))]
+            for entry in entries:
+                if entry.get('job_id'):
+                    job = self.get_job(entry['job_id']) or {}
+                    item = next((i for i in job.get('items', []) if i['email'] == entry['email']), {})
+                    if item.get('status') in ('synced', 'failed'):
+                        entry.update(status=item['status'], error=item.get('error', ''))
+            return entries
+
+    def enqueue_split(self, emails, source_job, *, trigger='split'):
         """持久化交接成功的分裂邮箱；忙时等待，重复交接不会重复入队。"""
         with self.lock:
             endpoint = self.config['api_url']
@@ -204,7 +221,7 @@ class FastAISync:
                         continue
                     key = hashlib.sha256((source_job + '\n' + endpoint + '\n' + email).encode()).hexdigest()
                     entry = {**eligible[email], 'api_url': endpoint, 'source_job': source_job,
-                             'status': 'pending', 'created_at': self.clock()}
+                             'status': 'pending', 'created_at': self.clock(), 'trigger': trigger}
                     db.execute('INSERT OR IGNORE INTO documents(kind,key,data) VALUES (?,?,?)',
                                ('split_fastai_outbox', key, json.dumps(entry)))
             self.wake.set()
@@ -231,7 +248,7 @@ class FastAISync:
                     continue
                 entry['status'] = 'failed'
                 self._set_status(entry, {'id': entry['job_id'], 'api_url': endpoint}, 'failed',
-                                 '分裂后同步未完成，请在邮箱列表重试')
+                                 '后台发送未完成，请在邮箱列表重试')
             elif endpoint == self.config['api_url']:
                 pending.append((key, entry))
                 continue
@@ -242,7 +259,11 @@ class FastAISync:
             return
         eligible = {row['email']: row for row in self.pending()}
         selected = []
+        # 按来源分组，注册完成后的任务使用独立日志标签。
+        trigger = pending[0][1].get('trigger', 'split') if pending else 'split'
         for key, entry in pending[:10000]:
+            if entry.get('trigger', 'split') != trigger:
+                continue
             if entry['email'] not in eligible or eligible[entry['email']]['inbox_url'] != entry['inbox_url']:
                 entry['status'] = 'skipped'
                 self.storage.write_document('split_fastai_outbox', entry, key)
@@ -250,7 +271,7 @@ class FastAISync:
                 selected.append((key, entry))
         if selected:
             job = self.start(emails=list(dict.fromkeys(e['email'] for _, e in selected)),
-                             selected_only=True, trigger='split')
+                             selected_only=True, trigger=trigger)
             for key, entry in selected:
                 entry.update(status='submitted', job_id=job['id'])
                 self.storage.write_document('split_fastai_outbox', entry, key)
@@ -335,7 +356,7 @@ class FastAISync:
                 job['finished_at']=self.clock()
                 self._save_job(job)
                 self.active=None
-                if self.config['enabled'] and job['trigger'] != 'split' and (job['trigger']=='scheduled' or job['succeeded']>0 or self.next_run is None):
+                if self.config['enabled'] and job['trigger'] not in ('split', 'registration') and (job['trigger']=='scheduled' or job['succeeded']>0 or self.next_run is None):
                     self.next_run=self.clock()+self.config['interval_minutes']*60
                 self._persist_state()
                 self.wake.set()

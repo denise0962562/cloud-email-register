@@ -78,6 +78,56 @@ class FastAISyncTest(unittest.TestCase):
         self.assertEqual(self.sync.next_run, deadline)
         self.assertEqual(self.http.post.call_args.args[0], original)
 
+    def test_registration_handoff_waits_for_round_and_logs_results_once(self):
+        from auto_registration import AutoRegistration
+        for email in ['new@icloud.com', 'new+one@icloud.com', 'deleted@icloud.com', 'bad@icloud.com']:
+            self.alias(email)
+        manager = Mock()
+        manager.get_account.return_value = {'real_email': 'owner@gmail.com'}
+        jobs = Mock(active=False)
+        jobs.start.return_value = 'registration1'
+        events = [dict(ok=True, email='new@icloud.com', action='create_source', account_id='a'),
+                  dict(ok=True, email='new+one@icloud.com', action='create_split', account_id='a'),
+                  dict(ok=True, email='deleted@icloud.com', action='delete_source', account_id='a'),
+                  dict(ok=False, email='bad@icloud.com', action='create_source', account_id='a')]
+        job = dict(status='running', events=events, results={}, total_created=1, total_errors=1, lines=[])
+        jobs.get.return_value = job
+        auto = AutoRegistration(jobs, manager, Path(self.folder.name)/'auto.json', fastai_sync=self.sync)
+        self.assertFalse(auto.config['sync_to_fastai'])
+        auto.run_now({'account_ids': ['a'], 'sync_to_fastai': True})
+        auto.tick()
+        self.assertEqual(self.sync.handoff_status('registration1'), [])
+        # 本轮开关不随运行中的配置修改改变。
+        auto.configure({'sync_to_fastai': False})
+        job['status'] = 'completed'
+        auto.tick(); auto.tick()
+        self.assertEqual(len(self.sync.handoff_status('registration1')), 2)
+        self.http.post.side_effect = [accepted(), Mock(status_code=400)]
+        self.sync.tick()
+        self.wait({'id': self.sync.latest})
+        self.assertEqual(self.sync.get_job(self.sync.latest)['trigger'], 'registration')
+        self.sync.tick(); auto.tick()
+        messages = [r['message'] for r in auto.logs]
+        self.assertTrue(any('[主账号：owner@gmail.com]' in m and 'FastAI 发送成功' in m for m in messages))
+        self.assertTrue(any('FastAI 发送失败' in m and '400' in m for m in messages))
+        self.assertTrue(any('成功 1 个，失败 1 个' in m for m in messages))
+        restored = AutoRegistration(jobs, manager, auto.path, fastai_sync=self.sync)
+        restored.tick(); auto.tick()
+        self.assertEqual(self.http.post.call_count, 2)
+        self.assertEqual(len(restored.logs), len(auto.logs))
+
+    def test_registration_queue_skips_synced_and_preserves_sender_deadline(self):
+        self.alias('one@icloud.com'); self.alias('two@icloud.com')
+        self.wait(self.sync.start(emails=['one@icloud.com'], selected_only=True))
+        self.sync.configure({'enabled': True, 'interval_minutes': 5})
+        deadline = self.sync.next_run
+        self.sync.enqueue_registration(['one@icloud.com', 'two@icloud.com'], 'round')
+        self.sync.enqueue_registration(['one@icloud.com', 'two@icloud.com'], 'round')
+        self.sync.tick(); self.wait({'id': self.sync.latest}); self.sync.tick()
+        self.assertEqual(self.sync.next_run, deadline)
+        self.assertEqual(len(self.sync.handoff_status('round')), 1)
+        self.assertEqual(self.http.post.call_count, 2)
+
     def setUp(self):
         self.folder=tempfile.TemporaryDirectory();self.addCleanup(self.folder.cleanup)
         auth = AuthStore(Path(self.folder.name)/'auth.sqlite3')
