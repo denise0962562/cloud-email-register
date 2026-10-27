@@ -1,11 +1,17 @@
 """独立的 iCloud 会话保活，不控制注册、分裂或同步任务。"""
 import time
+import random
 
 
 class SessionMaintenance:
-    def __init__(self, manager, emit, interval=300, clock=time.monotonic):
+    def __init__(self, manager, emit, interval=None, clock=time.monotonic, random_interval=random.uniform):
         self.manager, self.emit, self.interval, self.clock = manager, emit, interval, clock
+        self.random_interval = random_interval
         self.pending = {}
+
+    def delay(self):
+        # 每轮重新抽取 10–20 分钟；固定间隔仅供测试注入。
+        return self.interval if self.interval is not None else self.random_interval(600, 1200)
 
     def tick(self):
         now = self.clock()
@@ -27,11 +33,11 @@ class SessionMaintenance:
             if result.get('status') == 'active':
                 if failures:
                     self.emit('info', f'账号会话已恢复 [{account.get("name", key)}]')
-                self.pending[key] = (now + self.interval, 0)
+                self.pending[key] = (self.clock() + self.delay(), 0)
             else:
                 failures += 1
-                delay = min(self.interval * 2 ** min(failures - 1, 4), 3600)
-                self.pending[key] = (now + delay, failures)
+                delay = min(self.delay() * 2 ** min(failures - 1, 4), 3600)
+                self.pending[key] = (self.clock() + delay, failures)
                 if result.get('session_requires_login'):
                     self.emit('warn', f'账号需要重新登录 iCloud 并更新 Cookie [{account.get("name", key)}]')
                 elif failures == 1:

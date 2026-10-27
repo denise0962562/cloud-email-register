@@ -839,7 +839,7 @@ def main():
     parser.add_argument("--disable-automation", action="store_true",
                         help="启动时关闭自动注册、自动分裂、自动同步及周期账号检查")
     parser.add_argument('--session-keepalive', action='store_true',
-                        help='独立开启每 5 分钟的会话保活，可与 --disable-automation 同时使用')
+                        help='独立开启随机间隔 10–20 分钟的会话保活，可与 --disable-automation 同时使用')
     args = parser.parse_args()
     if args.disable_automation and args.scheduler:
         parser.error("--disable-automation 不能与 --scheduler 同时使用")

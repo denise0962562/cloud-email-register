@@ -41,7 +41,7 @@ class SessionMaintenanceTest(unittest.TestCase):
             {'status': 'error', 'session_requires_login': True}, {'status': 'active'},
             {'status': 'active'}]
         emit = Mock()
-        keeper = SessionMaintenance(manager, emit, clock=lambda: now[0])
+        keeper = SessionMaintenance(manager, emit, interval=300, clock=lambda: now[0])
         keeper.tick()
         self.assertEqual(manager.keep_session_alive.call_count, 2)
         now[0] = 299
@@ -63,3 +63,30 @@ class SessionMaintenanceTest(unittest.TestCase):
         SessionMaintenance(manager, emit).tick()
         self.assertEqual(manager.keep_session_alive.call_count, 2)
         self.assertNotIn('private', str(emit.call_args_list))
+
+    def test_random_interval_is_redrawn_after_each_success_and_revoked_account_stays_paused(self):
+        now = [0]
+        account = {'id': 'a', 'cookies': {'token': 'old'}}
+        manager = Mock()
+        manager.list_accounts.return_value = [account]
+        manager.keep_session_alive.return_value = {'status': 'active'}
+        random_interval = Mock(side_effect=[600, 1200, 900])
+        keeper = SessionMaintenance(manager, Mock(), clock=lambda: now[0], random_interval=random_interval)
+        keeper.tick()
+        self.assertEqual(keeper.pending['a'][0], 600)
+        now[0] = 599
+        keeper.tick()
+        self.assertEqual(manager.keep_session_alive.call_count, 1)
+        now[0] = 600
+        keeper.tick()
+        self.assertEqual(keeper.pending['a'][0], 1800)
+        for call in random_interval.call_args_list:
+            self.assertEqual(call.args, (600, 1200))
+        account['session_requires_login'] = True
+        now[0] = 100000
+        keeper.tick()
+        self.assertEqual(manager.keep_session_alive.call_count, 2)
+        # 只有成功更新会话并清除撤销标记后才恢复。
+        account.update(cookies={'token': 'new'}, session_requires_login=False)
+        keeper.tick()
+        self.assertEqual(manager.keep_session_alive.call_count, 3)
