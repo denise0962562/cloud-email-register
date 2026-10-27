@@ -43,3 +43,12 @@ test('disabling all sources restores manual selection without affecting native r
   assert.equal(context.configFromForm().sync_to_fastai,true);
   assert.ok(!Object.hasOwn(setup(false).context.configFromForm(),'sync_to_fastai'));
  });
+
+test('整批数量直接提交，不再乘以源地址数，普通注册维持原数量字段',()=>{
+ const plus=setup();plus.fields.count.value='100';plus.context.sourceSelection();
+ assert.equal(plus.context.configFromForm().batch_total,100);
+ assert.equal(plus.context.configFromForm().count,undefined);
+ const native=setup(false);native.fields.count.value='5';
+ assert.equal(native.context.configFromForm().count,5);
+ assert.equal(native.context.configFromForm().batch_total,undefined);
+});

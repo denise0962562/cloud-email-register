@@ -1,4 +1,5 @@
 """自动分裂复用现有创建队列和定时器，独立保存配置及任务记录。"""
+import json
 import re
 import secrets
 import string
@@ -40,7 +41,7 @@ class PlusCreationJobs(CreationJobs):
                 if "+" not in email and is_ready(row) and row.get("forward_inbox_url")
                 and row.get("account_id") in self.manager.accounts}
 
-    def start(self, bases, count=10, label="auto", *, item_interval=3):
+    def start(self, bases, count=10, label="auto", *, item_interval=3, total=None):
         if (not isinstance(bases, list) or not bases
                 or any(not isinstance(x, str) for x in bases) or len(set(bases)) != len(bases)):
             raise ValueError("请选择不同的已配置收件源地址")
@@ -49,6 +50,8 @@ class PlusCreationJobs(CreationJobs):
             raise ValueError("源地址不存在、所属账号已移除或未配置收件")
         if type(count) is not int or not 1 <= count <= 200:
             raise ValueError("每个源地址每轮生成数量必须为 1–200 的整数（本地批次限制）")
+        if total is not None and (type(total) is not int or not 1 <= total <= 10000):
+            raise ValueError('整批创建数量必须为 1–10000 的整数')
         validate_prefix(label)
         if type(item_interval) is not int or not 0 <= item_interval <= 300:
             raise ValueError("地址间隔必须为 0–300 秒的整数")
@@ -59,7 +62,49 @@ class PlusCreationJobs(CreationJobs):
                 raise RuntimeError('已有创建任务运行中，请等待完成')
             self._source_owners = {base: sources[base]['account_id'] for base in bases}
             self._failed_addresses = set()
+            self._rotation_plan = None
+            if total is not None:
+                start = self.rotation_start(bases)
+                self._rotation_plan = {'bases': list(bases), 'start': start}
+                # 整批数量独立于源地址数；每次只取下一个源，走到末尾再绕回开头。
+                plan = [bases[(start + index) % len(bases)] for index in range(total)]
+                return super().start(plan, 1, label.lower(), interval=0, item_interval=item_interval)
             return super().start(bases, count, label.lower(), interval=0, item_interval=item_interval)
+
+    def rotation_start(self, bases):
+        """优先按上次源地址接续；源被移除时按保存的位置回退，避免每批回到第一条。"""
+        if not bases or not self.storage:
+            return 0
+        state = self.storage.read_document('plus_rotation') or {}
+        if not state:
+            # 升级前的手动批次也有逐项日志，从最近一次实际处理的位置接续。
+            with self.storage.connect() as db:
+                row = db.execute("SELECT json_extract(data,'$.events[#-1].base_email') "
+                                 "FROM documents WHERE kind='plus_creation_job' "
+                                 "AND json_array_length(json_extract(data,'$.events'))>0 "
+                                 "ORDER BY rowid DESC LIMIT 1").fetchone()
+            state = {'last_base': row[0]} if row else {}
+        last = state.get('last_base')
+        return (bases.index(last) + 1) % len(bases) if last in bases else state.get('next_index', 0) % len(bases)
+
+    def _persist(self, job_id):
+        job = self._jobs[job_id]
+        rotation = job.get('rotation') or getattr(self, '_rotation_plan', None)
+        if not rotation or not self.storage:
+            return super()._persist(job_id)
+        job['rotation'] = rotation
+        events = job.get('events', [])
+        with self.storage.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('INSERT INTO documents VALUES(?,?,?) ON CONFLICT(kind,key) DO UPDATE SET data=excluded.data',
+                       (self.document_kind, job_id, json.dumps(job, ensure_ascii=False)))
+            if events:
+                bases = rotation['bases']
+                position = (rotation['start'] + len(events)) % len(bases)
+                state = {'last_base': bases[(position - 1) % len(bases)], 'next_index': position}
+                # 任务结果和游标在同一事务提交；取消、刷新或服务重启都不会重复前移。
+                db.execute('INSERT INTO documents VALUES(?,?,?) ON CONFLICT(kind,key) DO UPDATE SET data=excluded.data',
+                           ('plus_rotation', 'default', json.dumps(state, ensure_ascii=False)))
 
     def create_item(self, base, label):
         target = None
@@ -121,11 +166,21 @@ class AutoPlusAddresses(AutoRegistration):
     target_limit = None
     defaults = {**{key: value for key, value in DEFAULTS.items() if key != "account_ids"},
                 "base_emails": [], "all_sources": True, "count": 10, "interval_mode": "fixed",
-                "interval_minutes": 60, "label": "auto", "sync_to_fastai": False}
+                "interval_minutes": 60, "label": "auto", "sync_to_fastai": False, "batch_total": None}
 
     def __init__(self, *args, fastai_sync=None, **kwargs):
         self.fastai_sync = fastai_sync
         super().__init__(*args, **kwargs)
+
+    def target_size(self, ids):
+        return self.config['batch_total'] if self.config['batch_total'] is not None else super().target_size(ids)
+
+    def start_job(self, ids):
+        if self.config['batch_total'] is None:
+            return super().start_job(ids)
+        return self.jobs.start(ids, 1, self.config['label'],
+                               item_interval=self.config['item_interval_seconds'],
+                               total=self.config['batch_total'])
 
     def task_metadata(self):
         # 每轮固定提交时的开关，修改配置从下一轮生效。
@@ -166,6 +221,9 @@ class AutoPlusAddresses(AutoRegistration):
                 raise ValueError("自动创建配置字段无效")
             if type(data.get('sync_to_fastai', self.config['sync_to_fastai'])) is not bool:
                 raise ValueError('分裂后同步 FastAI 开关必须为布尔值')
+            total = data.get('batch_total', self.config['batch_total'])
+            if total is not None and (type(total) is not int or not 1 <= total <= 10000):
+                raise ValueError('整批创建数量必须为 1–10000 的整数')
             all_sources = data.get("all_sources", self.config["all_sources"])
             if type(all_sources) is not bool:
                 raise ValueError("全部源地址开关必须为布尔值")
@@ -192,4 +250,6 @@ class AutoPlusAddresses(AutoRegistration):
             data = super().snapshot()
             if self.config["all_sources"]:
                 data["config"]["base_emails"] = list(self.jobs.sources())
+            bases = data['config']['base_emails']
+            data['next_source'] = bases[self.jobs.rotation_start(bases)] if bases else None
             return data

@@ -111,6 +111,13 @@ class AutoRegistration:
             self.wake.set()
             return self.snapshot()
 
+    def start_job(self, ids):
+        return self.jobs.start(ids, self.config["count"], self.config["label"],
+                               item_interval=self.config["item_interval_seconds"])
+
+    def target_size(self, ids):
+        return len(ids) * self.config["count"]
+
     def run_now(self, config=None, *, scheduled=False):
         with self.lock:
             if self.current or self.jobs.active: raise RuntimeError("已有任务运行，请等待完成")
@@ -119,16 +126,15 @@ class AutoRegistration:
             ids = self.config[self.target_key]
             if not ids: raise ValueError("请至少选择一个" + self.target_label)
             # Session failures are reported as normal job results; do not silently skip accounts.
-            job_id = self.jobs.start(ids, self.config["count"], self.config["label"],
-                                     item_interval=self.config["item_interval_seconds"])
+            job_id = self.start_job(ids)
             self.current = {"job_id": job_id, "started_at": self.clock(), "status": "running",
                             "trigger": "scheduled" if scheduled else "manual",
-                            "target": len(ids) * self.config["count"], "logged_results": 0,
+                            "target": self.target_size(ids), "logged_results": 0,
                             "lines": [], "total_created": 0, "total_errors": 0,
                             **self.task_metadata()}
             if scheduled:
                 self.next_run = None
-            self.log("info", f"任务 {job_id[:8]} 开始：{len(ids)} 个{self.target_label}，每个 {self.config['count']} 个")
+            self.log("info", f"任务 {job_id[:8]} 开始：{len(ids)} 个{self.target_label}，本批目标 {self.current['target']} 个")
             self.persist()
             self.wake.set()
             return job_id

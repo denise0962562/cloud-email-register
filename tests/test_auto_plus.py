@@ -132,6 +132,62 @@ class AutoPlusTest(unittest.TestCase):
         self.assertEqual(fixed['results']['base@icloud.com'][0]['email'], pending)
         self.assertEqual(len(self.store.emails()), 3)
 
+    def test_total_batch_two_tens_continue_rotation_and_never_schedule_next_when_disabled(self):
+        for index in range(24):
+            self.add_source(f'source{index}@icloud.com')
+        bases = list(self.records)
+        self.auto.configure({'batch_total':10, 'item_interval_seconds':0, 'enabled':False})
+        first = self.wait(self.auto.run_now()); self.auto.tick()
+        self.assertEqual(first['total'],10)
+        self.assertEqual([r['base_email'] for r in first['events']],bases[:10])
+        self.assertIsNone(self.auto.current)
+        self.assertIsNone(self.auto.next_run)
+        self.assertFalse(self.auto.config['enabled'])
+        second = self.wait(self.auto.run_now()); self.auto.tick()
+        self.assertEqual([r['base_email'] for r in second['events']],bases[10:20])
+        self.assertEqual(second['total_created'],10)
+        self.assertEqual(self.auto.snapshot()['next_source'],bases[20])
+        self.auto.tick()
+        self.assertFalse(self.jobs.active)
+        self.assertEqual(len(self.auto.history),2)
+
+    def test_total_batch_wraps_and_survives_job_manager_restart(self):
+        self.add_source('second@icloud.com');self.add_source('third@icloud.com')
+        bases = list(self.records)
+        first = self.wait(self.jobs.start(bases,1,'total',item_interval=0,total=5))
+        self.assertEqual([r['base_email'] for r in first['events']],bases+bases[:2])
+        self.jobs = PlusCreationJobs(self.manager)
+        second = self.wait(self.jobs.start(bases,1,'total',item_interval=0,total=2))
+        self.assertEqual([r['base_email'] for r in second['events']],[bases[2],bases[0]])
+        self.assertEqual(self.store.read_document('plus_rotation')['last_base'],bases[0])
+
+    def test_total_batch_cancel_keeps_actual_position_instead_of_planned_end(self):
+        self.add_source('second@icloud.com');self.add_source('third@icloud.com')
+        bases = list(self.records)
+        entered, release = threading.Event(),threading.Event()
+        original = self.jobs.create_item
+        def blocked(base,label):
+            entered.set();release.wait(3)
+            return original(base,label)
+        with patch.object(self.jobs,'create_item',side_effect=blocked):
+            key = self.jobs.start(bases,1,'cancel',item_interval=0,total=10)
+            self.assertTrue(entered.wait(2))
+            self.jobs.cancel(key);release.set()
+            stopped = self.wait(key)
+        self.assertEqual(stopped['status'],'cancelled')
+        self.assertEqual(stopped['total_created'],1)
+        self.assertEqual(self.jobs.rotation_start(bases),1)
+        resumed = self.wait(self.jobs.start(bases,1,'resume',item_interval=0,total=1))
+        self.assertEqual(resumed['events'][0]['base_email'],bases[1])
+
+    def test_total_batch_bad_count_never_starts_or_changes_saved_config(self):
+        for value in [0,10001,True,1.5,'10']:
+            with self.assertRaises(ValueError):
+                self.auto.configure({'batch_total':value})
+            with self.assertRaises(ValueError):
+                self.jobs.start(['base@icloud.com'],total=value)
+        self.assertFalse(self.jobs.active)
+
     def test_schedule_runs_after_deadline_and_persists_separately_from_registration(self):
         native = AutoRegistration(Mock(), self.manager, self.path, clock=lambda: self.now)
         native.configure({'account_ids':['owner'], 'count':2})
