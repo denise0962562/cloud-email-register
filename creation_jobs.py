@@ -1,5 +1,6 @@
 """Background creation jobs; polling never repeats a mutating request."""
 import copy
+import re
 import secrets
 import threading
 from storage import Storage
@@ -95,9 +96,15 @@ class CreationJobs:
                         else:
                             result = self.create_item(account_id, label)
                     except Exception as error:
-                        result = {"ok": False, "account_id": account_id, "error": str(error)[:250]}
+                        message = str(error)[:250]
+                        status = re.search(r"HTTP (401|403|421)\b", message)
+                        if status:
+                            message = f"iCloud 会话不可用（HTTP {status.group(1)}），请更新该账号 Cookie 后重新补齐"
+                        result = {"ok": False, "account_id": account_id, "error": message}
                         if repair is not None:
                             result["email"] = target
+                            from inbox_links import update_link
+                            update_link(target, {"last_error": message})
                     self._append(job_id, account_id, result)
                     if not result.get("ok") and repair is None:
                         break
